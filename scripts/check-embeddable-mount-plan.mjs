@@ -309,4 +309,174 @@ assert.equal(
   assert.equal(calls.workspaceLeaves, 0);
 }
 
+//--------------------------------------------------------------------------------
+//Boundaries the rows above reach only by argument: zero and nullish inputs, the
+//exact deadline, and the synchrony the mount effect depends on.
+//--------------------------------------------------------------------------------
+
+{
+  //timeoutMs = 0 is falsy-but-valid. `Date.now() >= deadline` (not `>`) is what
+  //makes it terminate; a `>` would spin forever on a factory that never readies.
+  let reads = 0;
+  const started = Date.now();
+  assert.equal(
+    await awaitCanvasNodeHost(
+      () => ({
+        isInitialized: () => {
+          reads += 1;
+          return false;
+        },
+      }),
+      () => false,
+      0,
+      25,
+      delay,
+    ),
+    false,
+    "a zero timeout gives up instead of looping forever",
+  );
+  assert.equal(reads, 1, "a zero timeout still checks readiness exactly once");
+  assert.ok(
+    Date.now() - started < 25,
+    "a zero timeout returns without waiting out a poll interval",
+  );
+}
+
+{
+  //A zero timeout must not discard a factory that is already usable.
+  const host = hostReadyAfter(0);
+  assert.equal(
+    await awaitCanvasNodeHost(() => host, () => false, 0, 25, delay),
+    true,
+    "a zero timeout still accepts a factory that is already initialized",
+  );
+}
+
+assert.equal(
+  requiresCanvasNodeHost(undefined, "md"),
+  false,
+  "an undefined subpath does not require a canvas node host",
+);
+assert.equal(
+  requiresCanvasNodeHost("#Section", null),
+  false,
+  "a null extension does not require a canvas node host",
+);
+
+{
+  //`getHost()` returning null forever must time out rather than throw: the
+  //optional call is the only thing standing between a torn-down view and a
+  //TypeError inside the poll loop.
+  assert.equal(
+    await awaitCanvasNodeHost(() => null, () => false, 20, 1, delay),
+    false,
+    "a factory that never appears times out instead of throwing",
+  );
+}
+
+{
+  //The factory can be torn down mid-wait (view closed while the poll runs).
+  let host = { isInitialized: () => false };
+  setTimeout(() => {
+    host = null;
+  }, 3);
+  assert.equal(
+    await awaitCanvasNodeHost(() => host, () => false, 30, 1, delay),
+    false,
+    "a factory that disappears mid-wait times out instead of throwing",
+  );
+}
+
+{
+  //The mount effect is synchronous up to its first await, and the base code
+  //mounted both hosts before returning. Neither fast path may become deferred:
+  //the effect's cleanup runs against whatever these calls have already created.
+  const order = [];
+  const pending = mountEmbeddableHost({
+    subpath: "#Section",
+    fileExtension: "md",
+    getHost: () => ({ isInitialized: () => true }),
+    createCanvasNode: () => order.push("canvas-node"),
+    createWorkspaceLeaf: () => order.push("workspace-leaf"),
+    delay,
+  });
+  order.push("effect-returned");
+  assert.equal(await pending, "canvas-node");
+  assert.deepEqual(
+    order,
+    ["canvas-node", "effect-returned"],
+    "a ready factory mounts the canvas node before the mount effect returns",
+  );
+}
+
+{
+  const order = [];
+  const pending = mountEmbeddableHost({
+    subpath: null,
+    fileExtension: "md",
+    getHost: () => ({ isInitialized: () => true }),
+    createCanvasNode: () => order.push("canvas-node"),
+    createWorkspaceLeaf: () => order.push("workspace-leaf"),
+    delay,
+  });
+  order.push("effect-returned");
+  assert.equal(await pending, "workspace-leaf");
+  assert.deepEqual(
+    order,
+    ["workspace-leaf", "effect-returned"],
+    "a whole-file embed mounts its leaf before the mount effect returns",
+  );
+}
+
+{
+  //The call site cancels on `!leafRef.current || !containerRef.current`, which
+  //the effect cleanup nulls. Cancellation is read again after the wait, so a
+  //teardown that lands while the factory is initializing mounts nothing even
+  //though the factory did become ready.
+  let torndown = false;
+  const host = {
+    isInitialized: () => torndown,
+  };
+  setTimeout(() => {
+    torndown = true;
+  }, 5);
+  const { options, calls } = mountRecorder({
+    getHost: () => host,
+    isCancelled: () => torndown,
+    timeoutMs: 500,
+  });
+  assert.equal(
+    await mountEmbeddableHost(options),
+    "none",
+    "a teardown landing as the factory readies mounts nothing",
+  );
+  assert.equal(
+    calls.canvasNodes,
+    0,
+    "a canvas node must not be created into a container the cleanup already released",
+  );
+  assert.equal(calls.workspaceLeaves, 0);
+}
+
+{
+  //Several embeddables mount concurrently in one drawing; each dispatch owns
+  //its own wait and must reach its own host.
+  const hosts = [hostReadyAfter(3), hostReadyAfter(1), hostReadyAfter(6)];
+  const recorders = hosts.map((host) =>
+    mountRecorder({ getHost: () => host, timeoutMs: 500 }),
+  );
+  const results = await Promise.all(
+    recorders.map(({ options }) => mountEmbeddableHost(options)),
+  );
+  assert.deepEqual(
+    results,
+    ["canvas-node", "canvas-node", "canvas-node"],
+    "concurrent embeddables each wait out the factory independently",
+  );
+  for (const { calls } of recorders) {
+    assert.equal(calls.canvasNodes, 1);
+    assert.equal(calls.workspaceLeaves, 0);
+  }
+}
+
 log("embeddable mount plan checks passed");

@@ -45,6 +45,25 @@ assert.doesNotMatch(
   "readiness must not be conjoined with the subpath test again: a subpath embed that mounts before the factory is ready would fall through to a whole-file workspace leaf",
 );
 
+// Re-conjoining the subpath test is only one way to restore the bug. Gating the
+// dispatch itself on readiness — `if (view.canvasNodeFactory.isInitialized())
+// void mountEmbeddableHost({...})` — reinstates #2931 just as completely while
+// leaving every assertion above satisfied, so the dispatch must be reached
+// unconditionally. The preceding statement is what decides that: an
+// unconditional call follows a closed statement or block (`;`, `{`, `}`), while
+// every guard form (`if (...)`, `... &&`, `... ?`) leaves the line open.
+const statementsBeforeDispatch = source
+  .slice(0, source.indexOf("void mountEmbeddableHost("))
+  .split("\n")
+  .map((line) => line.replace(/\/\/.*$/, "").trim())
+  .filter(Boolean);
+
+assert.match(
+  statementsBeforeDispatch[statementsBeforeDispatch.length - 1],
+  /[;{}]$/,
+  "the mount dispatch must not be guarded on factory readiness: the wait for the factory lives inside mountEmbeddableHost, so a readiness gate in front of it skips the wait and restores the whole-file workspace leaf",
+);
+
 // The fallback the timeout relies on must stay reachable from the dispatch
 // rather than being inlined back into the removed else branch.
 assert.match(
