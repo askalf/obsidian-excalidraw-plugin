@@ -49,6 +49,7 @@ export async function awaitCanvasNodeHost(
   isCancelled: () => boolean = () => false,
   timeoutMs: number = CANVAS_NODE_HOST_WAIT_TIMEOUT_MS,
   intervalMs: number = CANVAS_NODE_HOST_WAIT_INTERVAL_MS,
+  delay: (ms: number) => Promise<void> = sleep,
 ): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
@@ -61,6 +62,79 @@ export async function awaitCanvasNodeHost(
     if (Date.now() >= deadline) {
       return false;
     }
-    await new Promise<void>((resolve) => setTimeout(resolve, intervalMs));
+    await delay(intervalMs);
   }
+}
+
+/** Host chosen for an embeddable, or "none" when the embeddable unmounted first. */
+export type EmbeddableMountHost = "canvas-node" | "workspace-leaf" | "none";
+
+/** Collaborators the mount dispatch needs; injected so the decision stays testable. */
+export interface EmbeddableMountOptions {
+  subpath: string | null | undefined;
+  fileExtension: string | null | undefined;
+  getHost: () => CanvasNodeHost | null | undefined;
+  isCancelled?: () => boolean;
+  createCanvasNode: () => void;
+  createWorkspaceLeaf: () => void;
+  timeoutMs?: number;
+  intervalMs?: number;
+  delay?: (ms: number) => Promise<void>;
+}
+
+/**
+ * Mounts an embeddable into the host that can actually render it.
+ *
+ * @param options - Link details and the two mount actions.
+ * @returns The host that was used, for logging and tests.
+ * @remarks
+ * A subpath embed waits for the Canvas node factory rather than falling through
+ * to a workspace leaf, which would render the whole file instead of the linked
+ * section. The workspace leaf remains the fallback when the factory never
+ * initializes, preserving the previous behavior for that case.
+ */
+export async function mountEmbeddableHost(
+  options: EmbeddableMountOptions,
+): Promise<EmbeddableMountHost> {
+  const {
+    subpath,
+    fileExtension,
+    getHost,
+    isCancelled = () => false,
+    createCanvasNode,
+    createWorkspaceLeaf,
+    timeoutMs,
+    intervalMs,
+    delay,
+  } = options;
+
+  if (!requiresCanvasNodeHost(subpath, fileExtension)) {
+    if (isCancelled()) {
+      return "none";
+    }
+    createWorkspaceLeaf();
+    return "workspace-leaf";
+  }
+
+  if (getHost()?.isInitialized()) {
+    createCanvasNode();
+    return "canvas-node";
+  }
+
+  const ready = await awaitCanvasNodeHost(
+    getHost,
+    isCancelled,
+    timeoutMs,
+    intervalMs,
+    delay,
+  );
+  if (isCancelled()) {
+    return "none";
+  }
+  if (ready) {
+    createCanvasNode();
+    return "canvas-node";
+  }
+  createWorkspaceLeaf();
+  return "workspace-leaf";
 }

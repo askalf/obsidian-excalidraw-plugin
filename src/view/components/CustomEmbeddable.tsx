@@ -22,10 +22,7 @@ import {
   createLeaf,
   predictViewType,
 } from "src/utils/customEmbeddableUtils";
-import {
-  awaitCanvasNodeHost,
-  requiresCanvasNodeHost,
-} from "src/utils/embeddableMountPlan";
+import { mountEmbeddableHost } from "src/utils/embeddableMountPlan";
 import { EmbeddableMDCustomProps } from "src/shared/Dialogs/EmbeddableSettings";
 import { EmbeddableLeafRef } from "src/types/excalidrawViewTypes";
 import { t } from "src/lang/helpers";
@@ -864,25 +861,10 @@ function RenderObsidianView({
 
     patchMobileView(view);
     //if subpath is defined, create a canvas node else create a workspace leaf
-    if (requiresCanvasNodeHost(subpath, file.extension)) {
-      if (view.canvasNodeFactory?.isInitialized()) {
-        createNode("markdown");
-      } else {
-        //canvasNodeFactory initializes asynchronously on layout ready. Mounting a
-        //workspace leaf here would render the whole file instead of the linked
-        //section, so wait for the factory rather than fall through. #2931
-        void (async () => {
-          const ready = await awaitCanvasNodeHost(
-            () => view.canvasNodeFactory,
-            () => !leafRef.current || !containerRef.current,
-          );
-          if (!ready || !leafRef.current || !containerRef.current) {
-            return;
-          }
-          createNode("markdown");
-        })();
-      }
-    } else {
+    //canvasNodeFactory initializes asynchronously on layout ready. A subpath
+    //embed that mounted before it was ready used to fall through to a workspace
+    //leaf, which renders the whole file instead of the linked section. #2931
+    const mountWorkspaceLeaf = () => {
       const viewType = predictViewType(view.app, file);
       // markdown could still be a kanban board or other custom view on top of markdown, those need to be displayed in leaves
       if (
@@ -947,7 +929,16 @@ function RenderObsidianView({
           }
         })();
       }
-    }
+    };
+
+    void mountEmbeddableHost({
+      subpath,
+      fileExtension: file.extension,
+      getHost: () => view.canvasNodeFactory,
+      isCancelled: () => !leafRef.current || !containerRef.current,
+      createCanvasNode: () => createNode("markdown"),
+      createWorkspaceLeaf: mountWorkspaceLeaf,
+    });
 
     return () => {
       // disconnect observer if any
