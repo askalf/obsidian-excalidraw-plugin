@@ -64,6 +64,40 @@ assert.match(
   "the mount dispatch must not be guarded on factory readiness: the wait for the factory lives inside mountEmbeddableHost, so a readiness gate in front of it skips the wait and restores the whole-file workspace leaf",
 );
 
+// The dispatch's cancellation signal reads refs that the mount effect SHARES
+// with its replacement invocation: React's cleanup nulls leafRef.current and the
+// replacement's setup repopulates it, so a wait that saw the cleanup reads live
+// again afterwards and mounts over the replacement's host. The flag that fixes
+// that must be owned by this invocation (a `let` in the effect body) and must be
+// raised by the cleanup before any early return.
+assert.match(
+  dispatch[0],
+  /\bisCancelled:\s*\(\)\s*=>\s*\n?\s*effectCancelled\s*\|\|/,
+  "the dispatch's cancellation signal must consult this invocation's own flag first, not only the refs a replacement mount repopulates",
+);
+
+const effectFlag = source.match(/\blet\s+effectCancelled\s*=\s*false\s*;/g);
+assert.equal(
+  effectFlag?.length,
+  1,
+  "the cancellation flag must be declared once per invocation of the mount effect, not hoisted to module or component scope",
+);
+
+const cleanup = source.slice(source.indexOf("void mountEmbeddableHost("));
+const cleanupBody = cleanup.match(/return\s*\(\)\s*=>\s*\{([\s\S]*?)\n\s*\};/);
+assert.ok(cleanupBody, "the mount effect must return a cleanup");
+
+const cleanupStatements = cleanupBody[1]
+  .split("\n")
+  .map((line) => line.replace(/\/\/.*$/, "").trim())
+  .filter(Boolean);
+
+assert.equal(
+  cleanupStatements[0],
+  "effectCancelled = true;",
+  "the cleanup must supersede a pending mount as its first statement: the existing early returns below it would otherwise leave the superseded wait live",
+);
+
 // The fallback the timeout relies on must stay reachable from the dispatch
 // rather than being inlined back into the removed else branch.
 assert.match(

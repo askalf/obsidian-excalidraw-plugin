@@ -79,7 +79,7 @@ export async function awaitCanvasNodeHost(
       return true;
     }
     const lifecycle = host?.whenInitialized;
-    if (lifecycle) {
+    if (lifecycle !== undefined) {
       //The factory says when it is done rather than being guessed at. It
       //settles on every terminal path -- initialized, initialization failed,
       //destroyed -- so this wait ends without a deadline of its own, while the

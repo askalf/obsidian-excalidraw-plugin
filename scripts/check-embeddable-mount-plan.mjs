@@ -515,12 +515,11 @@ const lifecycleHost = () => {
 };
 
 {
-  //The review's case, at the real default cap: a factory that becomes usable
-  //well after CANVAS_NODE_HOST_WAIT_TIMEOUT_MS must still get its canvas node,
-  //because the whole point of the wait is the slow-startup path.
+  //The reported bug at the real default cap: a factory that becomes usable well
+  //after CANVAS_NODE_HOST_WAIT_TIMEOUT_MS must still get its canvas node,
+  //because the slow-startup path is the whole reason for waiting. #2931
   const host = lifecycleHost();
-  const readyAt = CANVAS_NODE_HOST_WAIT_TIMEOUT_MS + 150;
-  setTimeout(() => host.ready(), readyAt);
+  setTimeout(() => host.ready(), CANVAS_NODE_HOST_WAIT_TIMEOUT_MS + 150);
   const started = Date.now();
   const { options, calls } = mountRecorder({
     getHost: () => host,
@@ -565,7 +564,8 @@ const lifecycleHost = () => {
 
 {
   //The fallback survives, on the signal instead of the clock: a factory whose
-  //initialize() threw settles false and the embed takes the old leaf path.
+  //initialize() threw settles false and the embed takes the old leaf path at
+  //once rather than holding the embeddable blank until a cap expires.
   const host = lifecycleHost();
   setTimeout(() => host.givesUp(), 5);
   const { options, calls } = mountRecorder({
@@ -582,16 +582,15 @@ const lifecycleHost = () => {
   assert.equal(calls.workspaceLeaves, 1);
   assert.equal(calls.canvasNodes, 0);
   assert.ok(
-    Date.now() - started < 5000,
+    Date.now() - started < 1000,
     "the fallback is taken on the signal, not by waiting out the cap",
   );
 }
 
 {
-  //destroy() settles the lifecycle true-then-destroyed is impossible, but a
-  //factory that initialized and was torn down in the same turn still reports
-  //true on the promise; the re-read is what stops a node going into a dead
-  //factory.
+  //A factory that initialized and was destroyed in the same turn settles true
+  //but can no longer host a node. The read after the signal is what catches it,
+  //and it too must resolve on the signal rather than by waiting out the cap.
   const host = lifecycleHost();
   setTimeout(() => {
     host.ready();
@@ -602,6 +601,7 @@ const lifecycleHost = () => {
     timeoutMs: 5000,
     intervalMs: 1,
   });
+  const started = Date.now();
   assert.equal(
     await mountEmbeddableHost(options),
     "workspace-leaf",
@@ -609,11 +609,15 @@ const lifecycleHost = () => {
   );
   assert.equal(calls.canvasNodes, 0);
   assert.equal(calls.workspaceLeaves, 1);
+  assert.ok(
+    Date.now() - started < 1000,
+    "a settled-then-destroyed factory is decided on the signal, not the cap",
+  );
 }
 
 {
-  //Cancellation must stay observable while waiting on the lifecycle: the poll
-  //interval races the promise precisely so an unmount is still noticed.
+  //Racing the lifecycle against the poll interval is what keeps an unmount
+  //visible while waiting on a promise that may never settle (control).
   const host = lifecycleHost();
   let torndown = false;
   setTimeout(() => {
@@ -628,7 +632,7 @@ const lifecycleHost = () => {
   assert.equal(
     await mountEmbeddableHost(options),
     "none",
-    "an embeddable unmounted while waiting on the lifecycle mounts nothing",
+    "an embeddable unmounted while waiting on the lifecycle mounts nothing (control)",
   );
   assert.equal(calls.canvasNodes, 0);
   assert.equal(calls.workspaceLeaves, 0);
@@ -652,8 +656,8 @@ const lifecycleHost = () => {
 }
 
 {
-  //A lifecycle that already settled true is honoured on the first poll rather
-  //than waiting out an interval.
+  //A factory already usable is taken on the fast path without consulting the
+  //lifecycle promise at all (control).
   const host = lifecycleHost();
   host.ready();
   const { options, calls } = mountRecorder({
@@ -662,7 +666,11 @@ const lifecycleHost = () => {
     intervalMs: 1000,
   });
   const started = Date.now();
-  assert.equal(await mountEmbeddableHost(options), "canvas-node");
+  assert.equal(
+    await mountEmbeddableHost(options),
+    "canvas-node",
+    "an already initialized factory mounts at once (control)",
+  );
   assert.equal(calls.canvasNodes, 1);
   assert.ok(
     Date.now() - started < 1000,
@@ -671,24 +679,29 @@ const lifecycleHost = () => {
 }
 
 //--------------------------------------------------------------------------------
-//Cancellation latches per dispatch. The call site's signal reads shared refs,
-//which a replacement mount repopulates, so a superseded wait would otherwise
-//see itself live again and mount over the host the replacement just created.
+//Cancellation latches per dispatch. The call site's signal reads leafRef and
+//containerRef, which the replacement invocation of the mount effect repopulates,
+//so a superseded wait would otherwise see itself live again after the poll that
+//observed the cleanup, and mount over the host the replacement just created.
 //--------------------------------------------------------------------------------
 
+/**
+ * Cancellation as React drives it: live at setup, cancelled on the poll that
+ * observes this invocation's cleanup, then live again because the replacement
+ * invocation repopulated the very same refs. Read-counted so it is deterministic.
+ */
+const cancelledOnRead = (read) => {
+  let reads = 0;
+  return () => {
+    reads += 1;
+    return reads === read;
+  };
+};
+
 {
-  const host = lifecycleHost();
-  let live = true;
-  setTimeout(() => {
-    live = false; //React cleanup for this invocation nulls the refs
-  }, 5);
-  setTimeout(() => {
-    live = true; //the replacement invocation repopulates the same refs
-    host.ready();
-  }, 15);
   const { options, calls } = mountRecorder({
-    getHost: () => host,
-    isCancelled: () => !live,
+    getHost: () => ({ isInitialized: () => false }),
+    isCancelled: cancelledOnRead(2),
     timeoutMs: 5000,
     intervalMs: 1,
   });
@@ -696,6 +709,30 @@ const lifecycleHost = () => {
     await mountEmbeddableHost(options),
     "none",
     "a dispatch cancelled mid-wait stays cancelled when the refs come back",
+  );
+  assert.equal(
+    calls.workspaceLeaves,
+    0,
+    "a superseded wait must not mount a whole-file leaf over the replacement",
+  );
+  assert.equal(calls.canvasNodes, 0);
+}
+
+{
+  //The same latch on the other outcome: the factory readies while the dispatch
+  //is already superseded, so the stale wait must not create the node either.
+  const host = lifecycleHost();
+  const { options, calls } = mountRecorder({
+    getHost: () => host,
+    isCancelled: cancelledOnRead(2),
+    timeoutMs: 5000,
+    intervalMs: 1,
+  });
+  setTimeout(() => host.ready(), 10);
+  assert.equal(
+    await mountEmbeddableHost(options),
+    "none",
+    "a superseded wait does not create a node once the factory readies",
   );
   assert.equal(
     calls.canvasNodes,
@@ -706,41 +743,15 @@ const lifecycleHost = () => {
 }
 
 {
-  //The same latch on the workspace-leaf route: a whole-file embed whose refs
-  //were released and repopulated is still a superseded dispatch.
-  let live = true;
-  const { options, calls } = mountRecorder({
-    subpath: null,
-    getHost: () => ({ isInitialized: () => false }),
-    isCancelled: () => {
-      const wasLive = live;
-      live = !live; //flips to cancelled on the first read, live again on the next
-      return !wasLive;
-    },
-    timeoutMs: 20,
-    intervalMs: 1,
-  });
-  live = false;
-  assert.equal(
-    await mountEmbeddableHost(options),
-    "none",
-    "a cancelled whole-file dispatch does not mount a leaf",
-  );
-  assert.equal(calls.workspaceLeaves, 0);
-  assert.equal(calls.canvasNodes, 0);
-}
-
-{
-  //Link changed while the first mount was waiting: only the replacement mounts.
-  //Both dispatches share the refs, as the two effect invocations do.
+  //Link changed while the first mount was waiting: only the replacement mounts,
+  //and the replacement takes the fast path the readied factory now offers.
   const host = lifecycleHost();
   const mounted = [];
-  const refs = { live: true };
   const first = mountEmbeddableHost({
     subpath: "#A",
     fileExtension: "md",
     getHost: () => host,
-    isCancelled: () => !refs.live,
+    isCancelled: cancelledOnRead(2),
     createCanvasNode: () => mounted.push("#A"),
     createWorkspaceLeaf: () => mounted.push("#A-leaf"),
     timeoutMs: 5000,
@@ -748,15 +759,12 @@ const lifecycleHost = () => {
     delay,
   });
   await delay(5);
-  refs.live = false; //cleanup of the #A invocation
-  await delay(5);
-  refs.live = true; //setup of the #B invocation
-  host.ready();
+  host.ready(); //the replacement's setup, with the factory now usable
   const second = await mountEmbeddableHost({
     subpath: "#B",
     fileExtension: "md",
     getHost: () => host,
-    isCancelled: () => !refs.live,
+    isCancelled: () => false,
     createCanvasNode: () => mounted.push("#B"),
     createWorkspaceLeaf: () => mounted.push("#B-leaf"),
     timeoutMs: 5000,
@@ -773,50 +781,6 @@ const lifecycleHost = () => {
     mounted,
     ["#B"],
     "only the current link is mounted; the superseded wait must not replace it",
-  );
-}
-
-{
-  //Control: a dispatch that is never cancelled is unaffected by the latch.
-  const host = lifecycleHost();
-  setTimeout(() => host.ready(), 5);
-  const { options, calls } = mountRecorder({
-    getHost: () => host,
-    isCancelled: () => false,
-    timeoutMs: 5000,
-    intervalMs: 1,
-  });
-  assert.equal(
-    await mountEmbeddableHost(options),
-    "canvas-node",
-    "an uncancelled dispatch still mounts its canvas node (control)",
-  );
-  assert.equal(calls.canvasNodes, 1);
-}
-
-{
-  //awaitCanvasNodeHost is reached by the dispatch above, but it is exported and
-  //its own latch is what the dispatch relies on: once cancelled, a later live
-  //read does not resurrect the wait.
-  const host = lifecycleHost();
-  let live = true;
-  setTimeout(() => {
-    live = false;
-  }, 5);
-  setTimeout(() => {
-    live = true;
-    host.ready();
-  }, 15);
-  assert.equal(
-    await awaitCanvasNodeHost(
-      () => host,
-      () => !live,
-      5000,
-      1,
-      delay,
-    ),
-    false,
-    "a cancelled wait does not resume when the caller's signal reads live again",
   );
 }
 
