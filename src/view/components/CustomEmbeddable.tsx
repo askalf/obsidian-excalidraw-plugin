@@ -931,16 +931,26 @@ function RenderObsidianView({
       }
     };
 
+    //Owned by this invocation of the effect, unlike leafRef/containerRef which
+    //a replacement invocation repopulates. Without it, changing the link while
+    //the mount is still waiting for the factory leaves the superseded wait
+    //reading its refs as live, and it mounts over the replacement's host.
+    let effectCancelled = false;
+
     void mountEmbeddableHost({
       subpath,
       fileExtension: file.extension,
       getHost: () => view.canvasNodeFactory,
-      isCancelled: () => !leafRef.current || !containerRef.current,
+      isCancelled: () =>
+        effectCancelled || !leafRef.current || !containerRef.current,
       createCanvasNode: () => createNode("markdown"),
       createWorkspaceLeaf: mountWorkspaceLeaf,
     });
 
     return () => {
+      //first, before any early return: supersedes a mount still waiting above
+      effectCancelled = true;
+
       // disconnect observer if any
       pdfObserverRef.currentCleanup?.();
       pdfObserverRef.current?.disconnect();

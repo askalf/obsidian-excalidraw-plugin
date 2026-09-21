@@ -59,6 +59,18 @@ export class CanvasNodeFactory {
   nodes = new Map<string, ObsidianCanvasNode>();
   initialized: boolean = false;
   public isInitialized = () => this.initialized;
+  private settleInitialized: (initialized: boolean) => void;
+  /**
+   * Settles true once `initialize()` succeeded, false once it failed or the
+   * factory was destroyed. Lets a caller wait for the real lifecycle instead of
+   * a wall-clock guess: layout ready can poll for up to 50 x 50 ms before
+   * `initialize()` is called at all, and initialization then awaits the core
+   * canvas plugin's load, so no fixed timeout distinguishes a slow start from
+   * one that will never finish.
+   */
+  public readonly whenInitialized = new Promise<boolean>((resolve) => {
+    this.settleInitialized = resolve;
+  });
   private observer: CustomMutationObserver | MutationObserver;
   private readonly pendingEditRequests = new WeakMap<
     ObsidianCanvasNode,
@@ -68,24 +80,33 @@ export class CanvasNodeFactory {
   constructor(private view: ExcalidrawView) {}
 
   public async initialize() {
-    const app = this.view.app;
-    const canvasPlugin = app.internalPlugins.plugins.canvas;
+    try {
+      const app = this.view.app;
+      const canvasPlugin = app.internalPlugins.plugins.canvas;
 
-    if (!canvasPlugin._loaded) {
-      await canvasPlugin.load();
+      if (!canvasPlugin._loaded) {
+        await canvasPlugin.load();
+      }
+      const doc = this.view.ownerDocument;
+      const rootSplit: WorkspaceSplit =
+        new (WorkspaceSplit as ConstructableWorkspaceSplit)(
+          app.workspace,
+          "vertical",
+        );
+      rootSplit.getRoot = () =>
+        app.workspace[doc === mainDocument ? "rootSplit" : "floatingSplit"];
+      rootSplit.getContainer = () => getContainerForDocument(doc);
+      this.leaf = app.workspace.createLeafInParent(rootSplit, 0);
+      this.canvas = canvasPlugin.views.canvas(this.leaf)
+        .canvas as ObsidianCanvas;
+      this.initialized = true;
+      this.settleInitialized(true);
+    } catch (error) {
+      //A caller waiting on the lifecycle must be released on the failing path
+      //too, otherwise it waits forever; the error still propagates as before.
+      this.settleInitialized(false);
+      throw error;
     }
-    const doc = this.view.ownerDocument;
-    const rootSplit: WorkspaceSplit =
-      new (WorkspaceSplit as ConstructableWorkspaceSplit)(
-        app.workspace,
-        "vertical",
-      );
-    rootSplit.getRoot = () =>
-      app.workspace[doc === mainDocument ? "rootSplit" : "floatingSplit"];
-    rootSplit.getContainer = () => getContainerForDocument(doc);
-    this.leaf = app.workspace.createLeafInParent(rootSplit, 0);
-    this.canvas = canvasPlugin.views.canvas(this.leaf).canvas as ObsidianCanvas;
-    this.initialized = true;
   }
 
   public createFileNote(
@@ -277,6 +298,7 @@ export class CanvasNodeFactory {
   destroy() {
     this.purgeNodes();
     this.initialized = false; //calling after purgeNodes becaues purge nodes checks for initialized
+    this.settleInitialized(false); //release anyone still waiting to be able to create a node
     this.observer?.disconnect();
     this.view = null;
     this.canvas = null;

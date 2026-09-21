@@ -3,6 +3,7 @@ import { createJiti } from "jiti";
 
 const jiti = createJiti(import.meta.url);
 const {
+  CANVAS_NODE_HOST_WAIT_TIMEOUT_MS,
   awaitCanvasNodeHost,
   mountEmbeddableHost,
   requiresCanvasNodeHost,
@@ -477,6 +478,346 @@ assert.equal(
     assert.equal(calls.canvasNodes, 1);
     assert.equal(calls.workspaceLeaves, 0);
   }
+}
+
+//--------------------------------------------------------------------------------
+//The factory's lifecycle, not the clock, decides how long a subpath embed waits.
+//Startup can legitimately outrun any fixed cap: layout ready polls up to
+//50 x 50 ms before initialize() is called, and initialize() then awaits the core
+//canvas plugin's load. A host that reports whenInitialized is waited on through
+//that signal; the cap survives only for a host that reports nothing.
+//--------------------------------------------------------------------------------
+
+/** Factory that reports its lifecycle and readies when the returned hook is run. */
+const lifecycleHost = () => {
+  let settle;
+  const host = {
+    reads: 0,
+    initialized: false,
+    isInitialized: () => {
+      host.reads += 1;
+      return host.initialized;
+    },
+    whenInitialized: new Promise((resolve) => {
+      settle = resolve;
+    }),
+    ready: () => {
+      host.initialized = true;
+      settle(true);
+    },
+    /** initialize() threw, or destroy() ran: it will never host a node. */
+    givesUp: () => {
+      host.initialized = false;
+      settle(false);
+    },
+  };
+  return host;
+};
+
+{
+  //The review's case, at the real default cap: a factory that becomes usable
+  //well after CANVAS_NODE_HOST_WAIT_TIMEOUT_MS must still get its canvas node,
+  //because the whole point of the wait is the slow-startup path.
+  const host = lifecycleHost();
+  const readyAt = CANVAS_NODE_HOST_WAIT_TIMEOUT_MS + 150;
+  setTimeout(() => host.ready(), readyAt);
+  const started = Date.now();
+  const { options, calls } = mountRecorder({
+    getHost: () => host,
+    timeoutMs: undefined,
+    intervalMs: 25,
+  });
+  assert.equal(
+    await mountEmbeddableHost(options),
+    "canvas-node",
+    "a factory that initializes after the default cap still mounts a canvas node",
+  );
+  assert.equal(calls.canvasNodes, 1);
+  assert.equal(
+    calls.workspaceLeaves,
+    0,
+    "a slow startup must not fall back to the whole-file workspace leaf",
+  );
+  assert.ok(
+    Date.now() - started >= CANVAS_NODE_HOST_WAIT_TIMEOUT_MS,
+    "the wait really did outlast the cap rather than readying early",
+  );
+}
+
+{
+  //The same shape with a short cap, so the discrimination is pinned twice: the
+  //cap expires long before readiness and must not end the wait.
+  const host = lifecycleHost();
+  setTimeout(() => host.ready(), 60);
+  const { options, calls } = mountRecorder({
+    getHost: () => host,
+    timeoutMs: 5,
+    intervalMs: 1,
+  });
+  assert.equal(
+    await mountEmbeddableHost(options),
+    "canvas-node",
+    "an expired cap does not end a wait on a factory that is still initializing",
+  );
+  assert.equal(calls.canvasNodes, 1);
+  assert.equal(calls.workspaceLeaves, 0);
+}
+
+{
+  //The fallback survives, on the signal instead of the clock: a factory whose
+  //initialize() threw settles false and the embed takes the old leaf path.
+  const host = lifecycleHost();
+  setTimeout(() => host.givesUp(), 5);
+  const { options, calls } = mountRecorder({
+    getHost: () => host,
+    timeoutMs: 5000,
+    intervalMs: 1,
+  });
+  const started = Date.now();
+  assert.equal(
+    await mountEmbeddableHost(options),
+    "workspace-leaf",
+    "a factory that reports it will not initialize falls back at once",
+  );
+  assert.equal(calls.workspaceLeaves, 1);
+  assert.equal(calls.canvasNodes, 0);
+  assert.ok(
+    Date.now() - started < 5000,
+    "the fallback is taken on the signal, not by waiting out the cap",
+  );
+}
+
+{
+  //destroy() settles the lifecycle true-then-destroyed is impossible, but a
+  //factory that initialized and was torn down in the same turn still reports
+  //true on the promise; the re-read is what stops a node going into a dead
+  //factory.
+  const host = lifecycleHost();
+  setTimeout(() => {
+    host.ready();
+    host.initialized = false; //destroy() ran right behind initialize()
+  }, 5);
+  const { options, calls } = mountRecorder({
+    getHost: () => host,
+    timeoutMs: 5000,
+    intervalMs: 1,
+  });
+  assert.equal(
+    await mountEmbeddableHost(options),
+    "workspace-leaf",
+    "a factory destroyed as it settled cannot host a canvas node",
+  );
+  assert.equal(calls.canvasNodes, 0);
+  assert.equal(calls.workspaceLeaves, 1);
+}
+
+{
+  //Cancellation must stay observable while waiting on the lifecycle: the poll
+  //interval races the promise precisely so an unmount is still noticed.
+  const host = lifecycleHost();
+  let torndown = false;
+  setTimeout(() => {
+    torndown = true;
+  }, 5);
+  const { options, calls } = mountRecorder({
+    getHost: () => host,
+    isCancelled: () => torndown,
+    timeoutMs: 5000,
+    intervalMs: 1,
+  });
+  assert.equal(
+    await mountEmbeddableHost(options),
+    "none",
+    "an embeddable unmounted while waiting on the lifecycle mounts nothing",
+  );
+  assert.equal(calls.canvasNodes, 0);
+  assert.equal(calls.workspaceLeaves, 0);
+}
+
+{
+  //A host that reports no lifecycle keeps the bounded wait: the cap is the
+  //floor for a factory that cannot say when it is done (control).
+  const { options, calls } = mountRecorder({
+    getHost: () => ({ isInitialized: () => false }),
+    timeoutMs: 20,
+    intervalMs: 1,
+  });
+  assert.equal(
+    await mountEmbeddableHost(options),
+    "workspace-leaf",
+    "a factory without a lifecycle signal still falls back at the cap (control)",
+  );
+  assert.equal(calls.workspaceLeaves, 1);
+  assert.equal(calls.canvasNodes, 0);
+}
+
+{
+  //A lifecycle that already settled true is honoured on the first poll rather
+  //than waiting out an interval.
+  const host = lifecycleHost();
+  host.ready();
+  const { options, calls } = mountRecorder({
+    getHost: () => host,
+    timeoutMs: 5000,
+    intervalMs: 1000,
+  });
+  const started = Date.now();
+  assert.equal(await mountEmbeddableHost(options), "canvas-node");
+  assert.equal(calls.canvasNodes, 1);
+  assert.ok(
+    Date.now() - started < 1000,
+    "an already settled lifecycle does not wait out a poll interval",
+  );
+}
+
+//--------------------------------------------------------------------------------
+//Cancellation latches per dispatch. The call site's signal reads shared refs,
+//which a replacement mount repopulates, so a superseded wait would otherwise
+//see itself live again and mount over the host the replacement just created.
+//--------------------------------------------------------------------------------
+
+{
+  const host = lifecycleHost();
+  let live = true;
+  setTimeout(() => {
+    live = false; //React cleanup for this invocation nulls the refs
+  }, 5);
+  setTimeout(() => {
+    live = true; //the replacement invocation repopulates the same refs
+    host.ready();
+  }, 15);
+  const { options, calls } = mountRecorder({
+    getHost: () => host,
+    isCancelled: () => !live,
+    timeoutMs: 5000,
+    intervalMs: 1,
+  });
+  assert.equal(
+    await mountEmbeddableHost(options),
+    "none",
+    "a dispatch cancelled mid-wait stays cancelled when the refs come back",
+  );
+  assert.equal(
+    calls.canvasNodes,
+    0,
+    "a superseded wait must not create a node over the replacement's host",
+  );
+  assert.equal(calls.workspaceLeaves, 0);
+}
+
+{
+  //The same latch on the workspace-leaf route: a whole-file embed whose refs
+  //were released and repopulated is still a superseded dispatch.
+  let live = true;
+  const { options, calls } = mountRecorder({
+    subpath: null,
+    getHost: () => ({ isInitialized: () => false }),
+    isCancelled: () => {
+      const wasLive = live;
+      live = !live; //flips to cancelled on the first read, live again on the next
+      return !wasLive;
+    },
+    timeoutMs: 20,
+    intervalMs: 1,
+  });
+  live = false;
+  assert.equal(
+    await mountEmbeddableHost(options),
+    "none",
+    "a cancelled whole-file dispatch does not mount a leaf",
+  );
+  assert.equal(calls.workspaceLeaves, 0);
+  assert.equal(calls.canvasNodes, 0);
+}
+
+{
+  //Link changed while the first mount was waiting: only the replacement mounts.
+  //Both dispatches share the refs, as the two effect invocations do.
+  const host = lifecycleHost();
+  const mounted = [];
+  const refs = { live: true };
+  const first = mountEmbeddableHost({
+    subpath: "#A",
+    fileExtension: "md",
+    getHost: () => host,
+    isCancelled: () => !refs.live,
+    createCanvasNode: () => mounted.push("#A"),
+    createWorkspaceLeaf: () => mounted.push("#A-leaf"),
+    timeoutMs: 5000,
+    intervalMs: 1,
+    delay,
+  });
+  await delay(5);
+  refs.live = false; //cleanup of the #A invocation
+  await delay(5);
+  refs.live = true; //setup of the #B invocation
+  host.ready();
+  const second = await mountEmbeddableHost({
+    subpath: "#B",
+    fileExtension: "md",
+    getHost: () => host,
+    isCancelled: () => !refs.live,
+    createCanvasNode: () => mounted.push("#B"),
+    createWorkspaceLeaf: () => mounted.push("#B-leaf"),
+    timeoutMs: 5000,
+    intervalMs: 1,
+    delay,
+  });
+  assert.equal(second, "canvas-node", "the replacement takes the fast path");
+  assert.equal(
+    await first,
+    "none",
+    "the superseded dispatch reports it mounted nothing",
+  );
+  assert.deepEqual(
+    mounted,
+    ["#B"],
+    "only the current link is mounted; the superseded wait must not replace it",
+  );
+}
+
+{
+  //Control: a dispatch that is never cancelled is unaffected by the latch.
+  const host = lifecycleHost();
+  setTimeout(() => host.ready(), 5);
+  const { options, calls } = mountRecorder({
+    getHost: () => host,
+    isCancelled: () => false,
+    timeoutMs: 5000,
+    intervalMs: 1,
+  });
+  assert.equal(
+    await mountEmbeddableHost(options),
+    "canvas-node",
+    "an uncancelled dispatch still mounts its canvas node (control)",
+  );
+  assert.equal(calls.canvasNodes, 1);
+}
+
+{
+  //awaitCanvasNodeHost is reached by the dispatch above, but it is exported and
+  //its own latch is what the dispatch relies on: once cancelled, a later live
+  //read does not resurrect the wait.
+  const host = lifecycleHost();
+  let live = true;
+  setTimeout(() => {
+    live = false;
+  }, 5);
+  setTimeout(() => {
+    live = true;
+    host.ready();
+  }, 15);
+  assert.equal(
+    await awaitCanvasNodeHost(
+      () => host,
+      () => !live,
+      5000,
+      1,
+      delay,
+    ),
+    false,
+    "a cancelled wait does not resume when the caller's signal reads live again",
+  );
 }
 
 log("embeddable mount plan checks passed");

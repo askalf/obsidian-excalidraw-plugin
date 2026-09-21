@@ -12,10 +12,27 @@
 /** Minimal `CanvasNodeFactory` surface needed to decide when a node can be created. */
 export interface CanvasNodeHost {
   isInitialized: () => boolean;
+  /**
+   * Settles true when the factory finished initializing, false when it can no
+   * longer do so. Absent on a host that does not report its lifecycle, which
+   * leaves such a caller on the bounded wait below.
+   */
+  whenInitialized?: Promise<boolean>;
 }
 
 export const CANVAS_NODE_HOST_WAIT_INTERVAL_MS = 25;
+/**
+ * Bounds the wait only while no factory is visible at all. A factory that
+ * reports its lifecycle is waited on through that signal instead: startup can
+ * legitimately outlast any wall-clock cap (layout ready polls for up to 50 x 50
+ * ms before `initialize()` is even called, and initialization itself awaits the
+ * core canvas plugin's load), so a cap is unable to tell "still starting" from
+ * "never coming" and expiring early is the mis-mount this module exists to fix.
+ */
 export const CANVAS_NODE_HOST_WAIT_TIMEOUT_MS = 2000;
+
+/** Marks a lifecycle race that the poll interval won, i.e. still initializing. */
+const STILL_INITIALIZING = Symbol("still-initializing");
 
 /**
  * Decides whether an embeddable must be hosted by a native Canvas node.
@@ -40,9 +57,10 @@ export function requiresCanvasNodeHost(
  * @param getHost - Reads the factory on each poll; it may be absent at first
  * and may be torn down while waiting, so it is re-read rather than captured.
  * @param isCancelled - Signals that the embeddable unmounted; stops the wait.
- * @param timeoutMs - Upper bound on the wait before the caller falls back.
+ * @param timeoutMs - Upper bound on the wait while no factory is visible.
  * @param intervalMs - Delay between polls.
- * @returns True when the factory became usable, false on cancel or timeout.
+ * @returns True when the factory became usable, false on cancel, on a factory
+ * that reported it will not initialize, or on the no-factory timeout.
  */
 export async function awaitCanvasNodeHost(
   getHost: () => CanvasNodeHost | null | undefined,
@@ -56,8 +74,26 @@ export async function awaitCanvasNodeHost(
     if (isCancelled()) {
       return false;
     }
-    if (getHost()?.isInitialized()) {
+    const host = getHost();
+    if (host?.isInitialized()) {
       return true;
+    }
+    const lifecycle = host?.whenInitialized;
+    if (lifecycle) {
+      //The factory says when it is done rather than being guessed at. It
+      //settles on every terminal path -- initialized, initialization failed,
+      //destroyed -- so this wait ends without a deadline of its own, while the
+      //interval keeps cancellation observable.
+      const settled = await Promise.race([
+        lifecycle,
+        delay(intervalMs).then(() => STILL_INITIALIZING),
+      ]);
+      if (settled === STILL_INITIALIZING) {
+        continue;
+      }
+      //One more read decides it: a factory that initialized and was then
+      //destroyed still reports true here but can no longer host a node.
+      return settled === true && Boolean(getHost()?.isInitialized());
     }
     if (Date.now() >= deadline) {
       return false;
@@ -90,8 +126,8 @@ export interface EmbeddableMountOptions {
  * @remarks
  * A subpath embed waits for the Canvas node factory rather than falling through
  * to a workspace leaf, which would render the whole file instead of the linked
- * section. The workspace leaf remains the fallback when the factory never
- * initializes, preserving the previous behavior for that case.
+ * section. The workspace leaf remains the fallback when the factory reports it
+ * will not initialize, preserving the previous behavior for that case.
  */
 export async function mountEmbeddableHost(
   options: EmbeddableMountOptions,
@@ -108,8 +144,17 @@ export async function mountEmbeddableHost(
     delay,
   } = options;
 
+  //Cancellation latches for this invocation: the caller's signal can read live
+  //again once a replacement mount repopulates the refs it watches, and an
+  //operation that has already seen itself cancelled must never mount anything.
+  let cancelledOnce = false;
+  const cancelled = () => {
+    cancelledOnce ||= isCancelled();
+    return cancelledOnce;
+  };
+
   if (!requiresCanvasNodeHost(subpath, fileExtension)) {
-    if (isCancelled()) {
+    if (cancelled()) {
       return "none";
     }
     createWorkspaceLeaf();
@@ -123,12 +168,12 @@ export async function mountEmbeddableHost(
 
   const ready = await awaitCanvasNodeHost(
     getHost,
-    isCancelled,
+    cancelled,
     timeoutMs,
     intervalMs,
     delay,
   );
-  if (isCancelled()) {
+  if (cancelled()) {
     return "none";
   }
   if (ready) {
