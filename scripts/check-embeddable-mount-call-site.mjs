@@ -1,108 +1,179 @@
+// `mountEmbeddableHost` is only a fix while the embeddable mount effect really
+// dispatches through it: unconditionally, and cancelling per invocation. The
+// effect lives in a .tsx that imports the types-only `obsidian` package, so it
+// cannot be loaded here; these checks read its syntax instead. The wait for the
+// factory lives inside the helper, so a guard in front of the dispatch, or a
+// cancellation flag shared between invocations, restores #2931 while the
+// helper's own checks stay green. Node identity is asserted with assert.ok:
+// assert.equal serializes both nodes on failure, and a parent-linked AST is
+// large enough to exhaust the heap.
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
-
-// `mountEmbeddableHost` is only a fix while the embeddable mount effect
-// actually dispatches through it. The effect lives in a .tsx that imports the
-// types-only `obsidian` package, so it cannot be loaded here; these checks pin
-// the wiring at the call site instead. Deleting the dispatch and keeping the
-// helper leaves scripts/check-embeddable-mount-plan.mjs green, which is exactly
-// the regression this file exists to catch. #2931
+import ts from "typescript";
 
 const source = await readFile(
   new URL("../src/view/components/CustomEmbeddable.tsx", import.meta.url),
   "utf8",
 );
+const file = ts.createSourceFile(
+  "CustomEmbeddable.tsx",
+  source,
+  ts.ScriptTarget.Latest,
+  true,
+  ts.ScriptKind.TSX,
+);
 
 const log = (message) => process.stdout.write(`${message}\n`);
 
-assert.match(
-  source,
-  /import\s*\{\s*mountEmbeddableHost\s*\}\s*from\s*"src\/utils\/embeddableMountPlan"/,
+const collect = (match) => {
+  const found = [];
+  const visit = (node) => {
+    if (match(node)) {
+      found.push(node);
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(file);
+  return found;
+};
+
+const enclosingFunction = (node) => {
+  for (let parent = node.parent; parent; parent = parent.parent) {
+    if (ts.isFunctionLike(parent)) {
+      return parent;
+    }
+  }
+  return undefined;
+};
+
+const enclosingStatement = (node) => {
+  let current = node;
+  while (current.parent && !ts.isStatement(current)) {
+    current = current.parent;
+  }
+  return current;
+};
+
+assert.equal(
+  collect(
+    (node) =>
+      ts.isImportDeclaration(node) &&
+      node.moduleSpecifier.text === "src/utils/embeddableMountPlan",
+  ).length,
+  1,
   "the mount effect must import the mount-plan dispatch",
 );
 
-const dispatch = source.match(/mountEmbeddableHost\(\{[\s\S]*?\n\s*\}\);/);
-assert.ok(dispatch, "the mount effect must call mountEmbeddableHost");
+const dispatches = collect(
+  (node) =>
+    ts.isCallExpression(node) &&
+    ts.isIdentifier(node.expression) &&
+    node.expression.text === "mountEmbeddableHost",
+);
+assert.equal(
+  dispatches.length,
+  1,
+  "the mount effect must call mountEmbeddableHost exactly once",
+);
+const [dispatch] = dispatches;
+const effect = enclosingFunction(dispatch);
+assert.ok(effect, "the dispatch must be called from the mount effect");
 
-for (const [option, pattern] of [
-  ["subpath", /\bsubpath\s*,/],
-  ["fileExtension", /\bfileExtension:\s*file\.extension\s*,/],
-  ["getHost", /\bgetHost:\s*\(\)\s*=>\s*view\.canvasNodeFactory\s*,/],
-  ["isCancelled", /\bisCancelled:\s*\(\)\s*=>/],
-  ["createCanvasNode", /\bcreateCanvasNode:\s*\(\)\s*=>\s*createNode\("markdown"\)\s*,/],
-  ["createWorkspaceLeaf", /\bcreateWorkspaceLeaf:\s*/],
-]) {
-  assert.match(
-    dispatch[0],
-    pattern,
-    `the dispatch must pass ${option} so the helper can decide the host`,
+const [options] = dispatch.arguments;
+assert.ok(
+  options && ts.isObjectLiteralExpression(options),
+  "the dispatch must be passed its mount options",
+);
+const option = (name) =>
+  options.properties.find(
+    (property) =>
+      property.name &&
+      ts.isIdentifier(property.name) &&
+      property.name.text === name,
   );
+
+for (const name of [
+  "subpath",
+  "fileExtension",
+  "getHost",
+  "isCancelled",
+  "createCanvasNode",
+  "createWorkspaceLeaf",
+]) {
+  assert.ok(option(name), `the dispatch must pass ${name}`);
 }
 
-assert.doesNotMatch(
-  source,
-  /subpath\s*&&\s*\n?\s*view\.canvasNodeFactory\.isInitialized\(\)/,
-  "readiness must not be conjoined with the subpath test again: a subpath embed that mounts before the factory is ready would fall through to a whole-file workspace leaf",
+const statement = enclosingStatement(dispatch);
+assert.ok(
+  ts.isExpressionStatement(statement),
+  "the dispatch must be a statement of its own",
+);
+assert.ok(
+  statement.parent === effect.body,
+  "the dispatch must sit in the effect's body rather than in a conditional branch: a readiness gate in front of it skips the wait the helper owns",
+);
+assert.ok(
+  (ts.isVoidExpression(statement.expression)
+    ? statement.expression.expression
+    : statement.expression) === dispatch,
+  "the dispatch must be the whole expression, not an operand of a guard",
 );
 
-// Re-conjoining the subpath test is only one way to restore the bug. Gating the
-// dispatch itself on readiness — `if (view.canvasNodeFactory.isInitialized())
-// void mountEmbeddableHost({...})` — reinstates #2931 just as completely while
-// leaving every assertion above satisfied, so the dispatch must be reached
-// unconditionally. The preceding statement is what decides that: an
-// unconditional call follows a closed statement or block (`;`, `{`, `}`), while
-// every guard form (`if (...)`, `... &&`, `... ?`) leaves the line open.
-const statementsBeforeDispatch = source
-  .slice(0, source.indexOf("void mountEmbeddableHost("))
-  .split("\n")
-  .map((line) => line.replace(/\/\/.*$/, "").trim())
-  .filter(Boolean);
-
-assert.match(
-  statementsBeforeDispatch[statementsBeforeDispatch.length - 1],
-  /[;{}]$/,
-  "the mount dispatch must not be guarded on factory readiness: the wait for the factory lives inside mountEmbeddableHost, so a readiness gate in front of it skips the wait and restores the whole-file workspace leaf",
+const isCancelled = option("isCancelled");
+assert.ok(
+  ts.isPropertyAssignment(isCancelled) &&
+    ts.isArrowFunction(isCancelled.initializer),
+  "the cancellation signal must be a function the helper can re-read",
+);
+let firstOperand = isCancelled.initializer.body;
+while (
+  ts.isBinaryExpression(firstOperand) &&
+  firstOperand.operatorToken.kind === ts.SyntaxKind.BarBarToken
+) {
+  firstOperand = firstOperand.left;
+}
+assert.ok(
+  ts.isIdentifier(firstOperand) && firstOperand.text === "effectCancelled",
+  "the cancellation signal must consult this invocation's own flag first, not only the refs a replacement mount repopulates",
 );
 
-// The dispatch's cancellation signal reads refs that the mount effect SHARES
-// with its replacement invocation: React's cleanup nulls leafRef.current and the
-// replacement's setup repopulates it, so a wait that saw the cleanup reads live
-// again afterwards and mounts over the replacement's host. The flag that fixes
-// that must be owned by this invocation (a `let` in the effect body) and must be
-// raised by the cleanup before any early return.
-assert.match(
-  dispatch[0],
-  /\bisCancelled:\s*\(\)\s*=>\s*\n?\s*effectCancelled\s*\|\|/,
-  "the dispatch's cancellation signal must consult this invocation's own flag first, not only the refs a replacement mount repopulates",
+const declarations = collect(
+  (node) =>
+    ts.isVariableDeclaration(node) &&
+    ts.isIdentifier(node.name) &&
+    node.name.text === "effectCancelled",
 );
-
-const effectFlag = source.match(/\blet\s+effectCancelled\s*=\s*false\s*;/g);
 assert.equal(
-  effectFlag?.length,
+  declarations.length,
   1,
-  "the cancellation flag must be declared once per invocation of the mount effect, not hoisted to module or component scope",
+  "the cancellation flag must be declared exactly once",
+);
+assert.ok(
+  enclosingFunction(declarations[0]) === effect,
+  "the cancellation flag must be declared in the mount effect's own body: declared in any enclosing scope it is shared by every invocation, so one embeddable's cleanup cancels the mount that replaced it",
 );
 
-const cleanup = source.slice(source.indexOf("void mountEmbeddableHost("));
-const cleanupBody = cleanup.match(/return\s*\(\)\s*=>\s*\{([\s\S]*?)\n\s*\};/);
-assert.ok(cleanupBody, "the mount effect must return a cleanup");
-
-const cleanupStatements = cleanupBody[1]
-  .split("\n")
-  .map((line) => line.replace(/\/\/.*$/, "").trim())
-  .filter(Boolean);
+const cleanup = effect.body.statements.find(ts.isReturnStatement);
+assert.ok(
+  cleanup && ts.isArrowFunction(cleanup.expression),
+  "the mount effect must return a cleanup",
+);
+const [firstCleanupStatement] = cleanup.expression.body.statements;
+assert.equal(
+  firstCleanupStatement.getText(file),
+  "effectCancelled = true;",
+  "the cleanup must supersede a pending mount as its first statement: the early returns below it would otherwise leave the superseded wait live",
+);
 
 assert.equal(
-  cleanupStatements[0],
-  "effectCancelled = true;",
-  "the cleanup must supersede a pending mount as its first statement: the existing early returns below it would otherwise leave the superseded wait live",
-);
-
-// The fallback the timeout relies on must stay reachable from the dispatch
-// rather than being inlined back into the removed else branch.
-assert.match(
-  source,
-  /const\s+mountWorkspaceLeaf\s*=\s*\(\)\s*=>\s*\{/,
+  collect(
+    (node) =>
+      ts.isVariableDeclaration(node) &&
+      ts.isIdentifier(node.name) &&
+      node.name.text === "mountWorkspaceLeaf" &&
+      enclosingFunction(node) === effect,
+  ).length,
+  1,
   "the workspace leaf path must remain a callable the dispatch can fall back to",
 );
 
