@@ -373,16 +373,11 @@ block("readiness after the default cap still mounts a node", async () => {
 });
 
 block("an expired cap does not end a wait on a starting factory", async () => {
+  //The cap is a wall-clock quantity, so readiness has to land after real
+  //elapsed time for the expiry to be the thing under test.
   const host = lifecycleHost();
-  const { options, calls } = mountRecorder({
-    getHost: () => host,
-    isCancelled: () => {
-      //Ready on a later poll, so the cap has expired many times over by then.
-      host.reads >= 5 && host.ready();
-      return false;
-    },
-    timeoutMs: 5,
-  });
+  setTimeout(() => host.ready(), 60);
+  const { options, calls } = mountRecorder({ getHost: () => host, timeoutMs: 5 });
   assert.equal(await mountEmbeddableHost(options), "canvas-node");
   assert.equal(calls.canvasNodes, 1);
   assert.equal(calls.workspaceLeaves, 0);
@@ -410,7 +405,8 @@ block("a factory that reports it will not initialize falls back", async () => {
 
 block("a factory destroyed as it settled cannot host a node", async () => {
   //Settling true and being destroyed in the same turn: the read after the
-  //signal is the only thing that catches it.
+  //signal is the only thing that catches it, and the signal is also what
+  //decides it, well inside a cap this long.
   const host = lifecycleHost();
   const { options, calls } = mountRecorder({
     getHost: () => host,
@@ -421,9 +417,11 @@ block("a factory destroyed as it settled cannot host a node", async () => {
     },
     timeoutMs: 5000,
   });
+  const started = Date.now();
   assert.equal(await mountEmbeddableHost(options), "workspace-leaf");
   assert.equal(calls.canvasNodes, 0);
   assert.equal(calls.workspaceLeaves, 1);
+  assert.ok(Date.now() - started < 1000, "it was decided on the signal, not the cap");
 });
 
 block("an embeddable unmounted while waiting on the lifecycle mounts nothing", async () => {
