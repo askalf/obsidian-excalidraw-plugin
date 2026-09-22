@@ -23,11 +23,10 @@ export interface CanvasNodeHost {
 export const CANVAS_NODE_HOST_WAIT_INTERVAL_MS = 25;
 /**
  * Bounds the wait only while no factory is visible at all. A factory that
- * reports its lifecycle is waited on through that signal instead: startup can
- * legitimately outlast any wall-clock cap (layout ready polls for up to 50 x 50
- * ms before `initialize()` is even called, and initialization itself awaits the
- * core canvas plugin's load), so a cap is unable to tell "still starting" from
- * "never coming" and expiring early is the mis-mount this module exists to fix.
+ * reports its lifecycle is waited on through that signal instead, because
+ * startup can outlast any wall-clock cap: layout ready polls for up to 50 x 50
+ * ms before `initialize()` is called, and initialization then awaits the core
+ * canvas plugin's load.
  */
 export const CANVAS_NODE_HOST_WAIT_TIMEOUT_MS = 2000;
 
@@ -80,10 +79,9 @@ export async function awaitCanvasNodeHost(
     }
     const lifecycle = host?.whenInitialized;
     if (lifecycle !== undefined) {
-      //The factory says when it is done rather than being guessed at. It
-      //settles on every terminal path -- initialized, initialization failed,
-      //destroyed -- so this wait ends without a deadline of its own, while the
-      //interval keeps cancellation observable.
+      //The lifecycle settles on every terminal path (initialized,
+      //initialization failed, destroyed), so this wait needs no deadline of its
+      //own; racing the interval keeps cancellation observable meanwhile.
       const settled = await Promise.race([
         lifecycle,
         delay(intervalMs).then(() => STILL_INITIALIZING),

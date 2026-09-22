@@ -3,8 +3,8 @@
 // effect lives in a .tsx that imports the types-only `obsidian` package, so it
 // cannot be loaded here; these checks read its syntax instead. The wait for the
 // factory lives inside the helper, so a guard in front of the dispatch, or a
-// cancellation flag shared between invocations, restores #2931 while the
-// helper's own checks stay green. Node identity is asserted with assert.ok:
+// cancellation flag shared between invocations, restores the whole-file
+// workspace leaf while the helper's own checks stay green. Node identity is asserted with assert.ok:
 // assert.equal serializes both nodes on failure, and a parent-linked AST is
 // large enough to exhaust the heap.
 import assert from "node:assert/strict";

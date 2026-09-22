@@ -1,17 +1,11 @@
-/**
- * `CanvasNodeFactory.whenInitialized` -- the producer side of the mount wait.
- *
- * `scripts/check-embeddable-mount-plan.mjs` drives the consumer through the
- * injected `CanvasNodeHost` interface. This script drives the real factory, so
- * the three sites that settle the promise (`initialize()` succeeding, its
- * `catch`, `destroy()`) are executed rather than read, and the middle blocks run
- * the real factory through the real dispatch end to end.
- *
- * The factory imports `obsidian` (types only, `"main": ""`) and
- * `utils/obsidianUtils` (which pulls in the whole plugin), so both are aliased
- * to the stub module next to this file. Nothing under test is stubbed: the
- * lifecycle, the promise and the dispatch are the shipped code.
- */
+// `CanvasNodeFactory.whenInitialized`: the producer side of the mount wait, and
+// the real factory driven through the real dispatch. check-embeddable-mount-plan
+// covers the consumer through the injected `CanvasNodeHost` interface instead.
+//
+// The factory imports `obsidian` (types only, `"main": ""`) and
+// `utils/obsidianUtils` (which pulls in the whole plugin), so both are aliased
+// to the stub module next to this file. The lifecycle, the promise and the
+// dispatch are the shipped code.
 import assert from "node:assert/strict";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -36,12 +30,7 @@ const { CANVAS_NODE_HOST_WAIT_TIMEOUT_MS, mountEmbeddableHost } =
 const log = (message) => process.stdout.write(`${message}\n`);
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-/**
- * Minimal `ExcalidrawView` stand-in: the members `initialize()` reaches.
- *
- * @param loadMs - Delay before the core canvas plugin's load resolves.
- * @param loadThrows - Makes that load reject, i.e. the `catch` path.
- */
+//Minimal `ExcalidrawView` stand-in: the members `initialize()` reaches.
 const fakeView = ({ loadMs = 0, loadThrows = false } = {}) => ({
   ownerDocument: {},
   app: {
@@ -67,12 +56,12 @@ const fakeView = ({ loadMs = 0, loadThrows = false } = {}) => ({
   },
 });
 
-/** Resolves to the promise's value, or to `PENDING` if it has not settled. */
+//Resolves to the promise's value, or to `PENDING` if it has not settled.
 const PENDING = Symbol("pending");
 const settleWithin = (promise, ms = 50) =>
   Promise.race([promise, delay(ms).then(() => PENDING)]);
 
-/** Mount options for a subpath markdown embed hosted by `factory`. */
+//Mount options for a subpath markdown embed hosted by `factory`.
 const subpathMountOn = (factory, overrides = {}) => {
   const calls = { canvasNodes: 0, workspaceLeaves: 0 };
   return {
@@ -171,9 +160,8 @@ block(
 //The real factory through the real dispatch
 //--------------------------------------------------------------------------------
 
-block("a slow real factory still gets its canvas node (#2931)", async () => {
-  //The reported bug, with no hand-written host anywhere: the core canvas
-  //plugin's load outlasts the cap, which is what a cold vault start does.
+block("a slow real factory still gets its canvas node", async () => {
+  //A cold vault start: the core canvas plugin's load outlasts the cap.
   const factory = new CanvasNodeFactory(
     fakeView({ loadMs: CANVAS_NODE_HOST_WAIT_TIMEOUT_MS + 150 }),
   );
@@ -252,8 +240,8 @@ block("a zero cap does not shorten a lifecycle wait", async () => {
 });
 
 block("a negative cap does not shorten a lifecycle wait", async () => {
-  //Already expired at the first comparison, so it pins that the cap is not
-  //merely large enough but genuinely unconsulted on this arm.
+  //Already expired at the first comparison, so the cap is not merely large
+  //enough on this arm but unconsulted.
   const factory = new CanvasNodeFactory(fakeView({ loadMs: 60 }));
   const { options } = subpathMountOn(factory, { timeoutMs: -1 });
   const [host] = await Promise.all([
@@ -266,13 +254,9 @@ block("a negative cap does not shorten a lifecycle wait", async () => {
 block(
   "a lifecycle that never settles waits rather than mis-mounting, and stays cancellable",
   async () => {
-    //The accepted trade, executed rather than argued: with a lifecycle present
-    //the cap is skipped, so a host that never settles keeps its placeholder
-    //instead of falling back to the workspace leaf that renders the whole file.
-    //`CanvasNodeFactory` cannot produce one -- the three blocks above settle
-    //all three of its terminal paths -- but `awaitCanvasNodeHost` is exported.
-    //The second half is the bound on the first: the embeddable's own teardown
-    //ends the wait, so a stranded wait cannot outlive the component holding it.
+    //With a lifecycle present the cap is skipped, so a host that never settles
+    //keeps its placeholder rather than falling back to the workspace leaf that
+    //renders the whole file. The teardown is what bounds such a wait.
     const neverSettles = {
       isInitialized: () => false,
       whenInitialized: new Promise(() => {}),
@@ -307,11 +291,9 @@ block(
 block(
   "a view that drops its factory ends even a never-settling wait",
   async () => {
-    //Bounds the block above from the production side. `ExcalidrawView.onClose`
-    //sets `canvasNodeFactory = null`, so `getHost()` -- which is re-read on
-    //every poll rather than captured -- starts returning null and the cap
-    //applies again. A stranded lifecycle promise therefore cannot outlive the
-    //view that owns it even if the embeddable itself never unmounts.
+    //`ExcalidrawView.onClose` sets `canvasNodeFactory = null`, and `getHost()`
+    //is re-read on every poll, so the cap applies again once no factory is
+    //visible even if the embeddable itself never unmounts.
     let factory = {
       isInitialized: () => false,
       whenInitialized: new Promise(() => {}),

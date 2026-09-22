@@ -102,8 +102,8 @@ export class CanvasNodeFactory {
       this.initialized = true;
       this.settleInitialized(true);
     } catch (error) {
-      //A caller waiting on the lifecycle must be released on the failing path
-      //too, otherwise it waits forever; the error still propagates as before.
+      //Release a caller waiting on the lifecycle before rethrowing, otherwise
+      //it waits forever.
       this.settleInitialized(false);
       throw error;
     }

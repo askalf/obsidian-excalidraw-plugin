@@ -11,23 +11,64 @@ const {
 
 const log = (message) => process.stdout.write(`${message}\n`);
 
-// The module under test defaults its wait to Obsidian's `sleep` global, which
-// does not exist here; every call below injects a delay instead.
+//The module defaults its wait to Obsidian's `sleep` global, absent here.
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-/** Canvas node factory that reports ready after a given number of polls. */
-const hostReadyAfter = (polls) => {
+//Each block is independent: on an arm that reintroduces a defect, a failing
+//block must not hide the blocks after it.
+const blocks = [];
+const block = (name, fn) => blocks.push([name, fn]);
+
+const hostReadyOnRead = (read) => {
   const host = {
     reads: 0,
     isInitialized: () => {
       host.reads += 1;
-      return host.reads > polls;
+      return host.reads >= read;
     },
   };
   return host;
 };
 
-/** Records which host the dispatch mounted, mirroring the two call-site actions. */
+const unreadyHost = { isInitialized: () => false };
+
+const lifecycleHost = () => {
+  let settle;
+  const host = {
+    reads: 0,
+    initialized: false,
+    isInitialized: () => {
+      host.reads += 1;
+      return host.initialized;
+    },
+    whenInitialized: new Promise((resolve) => {
+      settle = resolve;
+    }),
+    ready: () => {
+      host.initialized = true;
+      settle(true);
+    },
+    //initialize() threw, or destroy() ran: it will never host a node.
+    givesUp: () => {
+      host.initialized = false;
+      settle(false);
+    },
+  };
+  return host;
+};
+
+//Cancellation as React drives it: live at setup, cancelled on the poll that
+//observes this invocation's cleanup, then live again because the replacement
+//invocation repopulated the very same refs. Read-counted, so it is
+//deterministic and models a signal that can go back to reporting live.
+const cancelledOnRead = (read) => {
+  let reads = 0;
+  return () => {
+    reads += 1;
+    return reads === read;
+  };
+};
+
 const mountRecorder = (overrides = {}) => {
   const calls = { canvasNodes: 0, workspaceLeaves: 0 };
   return {
@@ -54,470 +95,262 @@ const mountRecorder = (overrides = {}) => {
 //requiresCanvasNodeHost: which embeds can only be rendered by a Canvas node
 //--------------------------------------------------------------------------------
 
-assert.equal(
-  requiresCanvasNodeHost("#Section", "md"),
-  true,
-  "a markdown subpath embed requires a canvas node host",
-);
-assert.equal(
-  requiresCanvasNodeHost("#Section", "MD"),
-  true,
-  "an uppercase markdown extension still requires a canvas node host",
-);
-assert.equal(
-  requiresCanvasNodeHost("#^blockid", "md"),
-  true,
-  "a block reference subpath requires a canvas node host",
-);
-assert.equal(
-  requiresCanvasNodeHost(null, "md"),
-  false,
-  "a whole-file markdown embed does not require a canvas node host",
-);
-assert.equal(
-  requiresCanvasNodeHost("", "md"),
-  false,
-  "an empty subpath does not require a canvas node host",
-);
-assert.equal(
-  requiresCanvasNodeHost("#page=2", "pdf"),
-  false,
-  "a subpath on a non-markdown file does not require a canvas node host",
-);
-assert.equal(
-  requiresCanvasNodeHost("#Section", undefined),
-  false,
-  "a subpath on a file without an extension does not require a canvas node host",
-);
+block("only a markdown subpath embed requires a canvas node host", () => {
+  for (const [subpath, extension, required] of [
+    ["#Section", "md", true],
+    ["#Section", "MD", true],
+    ["#^blockid", "md", true],
+    ["#", "md", true],
+    [null, "md", false],
+    ["", "md", false],
+    [undefined, "md", false],
+    ["#page=2", "pdf", false],
+    ["#Section", undefined, false],
+    ["#Section", null, false],
+    ["#Section", "", false],
+  ]) {
+    assert.equal(
+      requiresCanvasNodeHost(subpath, extension),
+      required,
+      `subpath ${JSON.stringify(subpath)} on ${JSON.stringify(extension)}`,
+    );
+  }
+});
 
 //--------------------------------------------------------------------------------
 //awaitCanvasNodeHost: waiting out the factory's asynchronous initialization
 //--------------------------------------------------------------------------------
 
-{
-  const host = hostReadyAfter(0);
+block("an initialized factory is accepted on the first read", async () => {
+  const host = hostReadyOnRead(1);
   assert.equal(
     await awaitCanvasNodeHost(() => host, () => false, 1000, 1, delay),
     true,
-    "an already initialized factory is accepted",
   );
-  assert.equal(host.reads, 1, "an initialized factory is read exactly once");
-}
+  assert.equal(host.reads, 1);
+});
 
-{
-  const host = hostReadyAfter(3);
+block("a factory that initializes late is awaited", async () => {
+  const host = hostReadyOnRead(4);
   assert.equal(
     await awaitCanvasNodeHost(() => host, () => false, 1000, 1, delay),
     true,
-    "a factory that initializes late is awaited rather than skipped",
   );
-  assert.ok(host.reads > 1, "a late factory is polled more than once");
-}
+  assert.equal(host.reads, 4);
+});
 
-{
-  let host = null;
-  setTimeout(() => {
-    host = { isInitialized: () => true };
-  }, 5);
+block("a factory absent at mount time is re-read until it appears", async () => {
+  let reads = 0;
+  const getHost = () => {
+    reads += 1;
+    return reads < 3 ? null : { isInitialized: () => true };
+  };
+  assert.equal(await awaitCanvasNodeHost(getHost, () => false, 1000, 1, delay), true);
+});
+
+block("a factory that never initializes times out", async () => {
+  assert.equal(await awaitCanvasNodeHost(() => unreadyHost, () => false, 20, 1, delay), false);
+});
+
+block("a factory that never appears times out instead of throwing", async () => {
+  //The optional call on getHost() is all that stands between a torn-down view
+  //and a TypeError inside the poll loop.
+  assert.equal(await awaitCanvasNodeHost(() => null, () => false, 20, 1, delay), false);
+});
+
+block("a factory that disappears mid-wait times out instead of throwing", async () => {
+  let reads = 0;
+  const getHost = () => {
+    reads += 1;
+    return reads < 3 ? unreadyHost : null;
+  };
+  assert.equal(await awaitCanvasNodeHost(getHost, () => false, 30, 1, delay), false);
+});
+
+block("an embeddable that unmounts while waiting cancels the wait", async () => {
   assert.equal(
-    await awaitCanvasNodeHost(() => host, () => false, 1000, 1, delay),
-    true,
-    "a factory absent at mount time is re-read until it appears",
-  );
-}
-
-assert.equal(
-  await awaitCanvasNodeHost(
-    () => ({ isInitialized: () => false }),
-    () => false,
-    20,
-    1,
-    delay,
-  ),
-  false,
-  "a factory that never initializes times out so the caller can fall back",
-);
-
-{
-  let unmounted = false;
-  setTimeout(() => {
-    unmounted = true;
-  }, 5);
-  assert.equal(
-    await awaitCanvasNodeHost(
-      () => ({ isInitialized: () => false }),
-      () => unmounted,
-      5000,
-      1,
-      delay,
-    ),
+    await awaitCanvasNodeHost(() => unreadyHost, cancelledOnRead(3), 5000, 1, delay),
     false,
-    "an embeddable that unmounts while waiting cancels the wait",
   );
-}
+});
 
-{
-  const host = hostReadyAfter(0);
+block("an already unmounted embeddable never reads the factory", async () => {
+  const host = hostReadyOnRead(1);
+  assert.equal(await awaitCanvasNodeHost(() => host, () => true, 1000, 1, delay), false);
+  assert.equal(host.reads, 0);
+});
+
+block("a zero timeout gives up after one read rather than looping", async () => {
+  //timeoutMs = 0 is falsy but valid; `Date.now() >= deadline`, not `>`, is what
+  //makes it terminate.
+  const host = hostReadyOnRead(Number.MAX_SAFE_INTEGER);
+  const started = Date.now();
+  assert.equal(await awaitCanvasNodeHost(() => host, () => false, 0, 25, delay), false);
+  assert.equal(host.reads, 1);
+  assert.ok(Date.now() - started < 25, "it returned without waiting out a poll interval");
+});
+
+block("a zero timeout still accepts an initialized factory", async () => {
   assert.equal(
-    await awaitCanvasNodeHost(() => host, () => true, 1000, 1, delay),
-    false,
-    "an already unmounted embeddable stops before mounting",
+    await awaitCanvasNodeHost(() => hostReadyOnRead(1), () => false, 0, 25, delay),
+    true,
   );
-  assert.equal(
-    host.reads,
-    0,
-    "an already unmounted embeddable never reads the factory",
-  );
-}
+});
 
 //--------------------------------------------------------------------------------
-//mountEmbeddableHost: the dispatch the embeddable mount effect calls. #2931
+//mountEmbeddableHost: the dispatch the embeddable mount effect calls
 //--------------------------------------------------------------------------------
 
-{
-  const host = hostReadyAfter(4);
-  const { options, calls } = mountRecorder({ getHost: () => host });
-  assert.equal(
-    await mountEmbeddableHost(options),
-    "canvas-node",
-    "a subpath embed mounting before the factory is ready still gets a canvas node",
-  );
-  assert.equal(
-    calls.workspaceLeaves,
-    0,
-    "a workspace leaf renders the whole drawing instead of the linked section",
-  );
-  assert.equal(calls.canvasNodes, 1);
-}
+block("a subpath embed mounting before the factory is ready gets a node", async () => {
+  for (const subpath of ["#Section", "#^blockid"]) {
+    const host = hostReadyOnRead(5);
+    const { options, calls } = mountRecorder({ subpath, getHost: () => host });
+    assert.equal(await mountEmbeddableHost(options), "canvas-node", subpath);
+    assert.equal(calls.canvasNodes, 1, subpath);
+    assert.equal(
+      calls.workspaceLeaves,
+      0,
+      `a workspace leaf renders the whole drawing instead of ${subpath}`,
+    );
+  }
+});
 
-{
-  let host = null;
-  setTimeout(() => {
-    host = { isInitialized: () => true };
-  }, 5);
-  const { options, calls } = mountRecorder({ getHost: () => host });
-  assert.equal(
-    await mountEmbeddableHost(options),
-    "canvas-node",
-    "a subpath embed whose factory appears only after mount still gets a canvas node",
-  );
-  assert.equal(calls.workspaceLeaves, 0);
-}
-
-{
-  const host = hostReadyAfter(4);
+block("a subpath embed whose factory appears only after mount gets a node", async () => {
+  let reads = 0;
   const { options, calls } = mountRecorder({
-    subpath: "#^blockid",
-    getHost: () => host,
+    getHost: () => {
+      reads += 1;
+      return reads < 3 ? null : { isInitialized: () => true };
+    },
   });
-  assert.equal(
-    await mountEmbeddableHost(options),
-    "canvas-node",
-    "a block reference embed mounting before the factory is ready gets a canvas node",
-  );
+  assert.equal(await mountEmbeddableHost(options), "canvas-node");
   assert.equal(calls.workspaceLeaves, 0);
-}
+});
 
-{
+block("a subpath embed with a ready factory mounts a node", async () => {
   const { options, calls } = mountRecorder();
-  assert.equal(
-    await mountEmbeddableHost(options),
-    "canvas-node",
-    "a subpath embed with a ready factory mounts a canvas node (control)",
-  );
+  assert.equal(await mountEmbeddableHost(options), "canvas-node");
   assert.equal(calls.canvasNodes, 1);
   assert.equal(calls.workspaceLeaves, 0);
-}
+});
 
-{
+block("a subpath embed falls back when the factory never initializes", async () => {
   const { options, calls } = mountRecorder({
-    getHost: () => ({ isInitialized: () => false }),
+    getHost: () => unreadyHost,
     timeoutMs: 20,
   });
-  assert.equal(
-    await mountEmbeddableHost(options),
-    "workspace-leaf",
-    "a subpath embed falls back to a workspace leaf when the factory never initializes",
-  );
+  assert.equal(await mountEmbeddableHost(options), "workspace-leaf");
   assert.equal(calls.workspaceLeaves, 1);
   assert.equal(calls.canvasNodes, 0);
-}
+});
 
-{
-  const host = hostReadyAfter(0);
-  const { options, calls } = mountRecorder({
-    subpath: null,
-    getHost: () => host,
-  });
-  assert.equal(
-    await mountEmbeddableHost(options),
-    "workspace-leaf",
-    "a whole-file embed mounts a workspace leaf (control)",
-  );
-  assert.equal(calls.workspaceLeaves, 1);
-  assert.equal(host.reads, 0, "a whole-file embed must not wait on the factory");
-}
+block("an embed that needs no node mounts a leaf without waiting", async () => {
+  for (const [subpath, fileExtension] of [
+    [null, "md"],
+    ["#page=2", "pdf"],
+  ]) {
+    const host = hostReadyOnRead(1);
+    const { options, calls } = mountRecorder({
+      subpath,
+      fileExtension,
+      getHost: () => host,
+    });
+    assert.equal(await mountEmbeddableHost(options), "workspace-leaf", fileExtension);
+    assert.equal(calls.workspaceLeaves, 1, fileExtension);
+    assert.equal(host.reads, 0, `${fileExtension} must not wait on the factory`);
+  }
+});
 
-{
-  const host = hostReadyAfter(0);
+block("an embeddable unmounted while waiting mounts nothing", async () => {
   const { options, calls } = mountRecorder({
-    subpath: "#page=2",
-    fileExtension: "pdf",
-    getHost: () => host,
-  });
-  assert.equal(
-    await mountEmbeddableHost(options),
-    "workspace-leaf",
-    "a non-markdown subpath embed mounts a workspace leaf (control)",
-  );
-  assert.equal(calls.workspaceLeaves, 1);
-  assert.equal(host.reads, 0);
-}
-
-{
-  let unmounted = false;
-  setTimeout(() => {
-    unmounted = true;
-  }, 5);
-  const { options, calls } = mountRecorder({
-    getHost: () => ({ isInitialized: () => false }),
-    isCancelled: () => unmounted,
+    getHost: () => unreadyHost,
+    isCancelled: cancelledOnRead(3),
     timeoutMs: 5000,
   });
-  assert.equal(
-    await mountEmbeddableHost(options),
-    "none",
-    "an embeddable unmounted while waiting mounts nothing",
-  );
+  assert.equal(await mountEmbeddableHost(options), "none");
   assert.equal(calls.canvasNodes, 0);
   assert.equal(
     calls.workspaceLeaves,
     0,
-    "an unmounted embeddable must not mount a leaf into a detached container",
+    "it must not mount a leaf into a container the cleanup released",
   );
-}
+});
 
-{
-  const { options, calls } = mountRecorder({
-    subpath: null,
-    isCancelled: () => true,
-  });
-  assert.equal(
-    await mountEmbeddableHost(options),
-    "none",
-    "an already unmounted whole-file embed mounts nothing",
-  );
+block("an already unmounted whole-file embed mounts nothing", async () => {
+  const { options, calls } = mountRecorder({ subpath: null, isCancelled: () => true });
+  assert.equal(await mountEmbeddableHost(options), "none");
   assert.equal(calls.workspaceLeaves, 0);
-}
+});
 
-//--------------------------------------------------------------------------------
-//Boundaries the rows above reach only by argument: zero and nullish inputs, the
-//exact deadline, and the synchrony the mount effect depends on.
-//--------------------------------------------------------------------------------
-
-{
-  //timeoutMs = 0 is falsy-but-valid. `Date.now() >= deadline` (not `>`) is what
-  //makes it terminate; a `>` would spin forever on a factory that never readies.
-  let reads = 0;
-  const started = Date.now();
-  assert.equal(
-    await awaitCanvasNodeHost(
-      () => ({
-        isInitialized: () => {
-          reads += 1;
-          return false;
-        },
-      }),
-      () => false,
-      0,
-      25,
-      delay,
-    ),
-    false,
-    "a zero timeout gives up instead of looping forever",
-  );
-  assert.equal(reads, 1, "a zero timeout still checks readiness exactly once");
-  assert.ok(
-    Date.now() - started < 25,
-    "a zero timeout returns without waiting out a poll interval",
-  );
-}
-
-{
-  //A zero timeout must not discard a factory that is already usable.
-  const host = hostReadyAfter(0);
-  assert.equal(
-    await awaitCanvasNodeHost(() => host, () => false, 0, 25, delay),
-    true,
-    "a zero timeout still accepts a factory that is already initialized",
-  );
-}
-
-assert.equal(
-  requiresCanvasNodeHost(undefined, "md"),
-  false,
-  "an undefined subpath does not require a canvas node host",
-);
-assert.equal(
-  requiresCanvasNodeHost("#Section", null),
-  false,
-  "a null extension does not require a canvas node host",
-);
-
-{
-  //`getHost()` returning null forever must time out rather than throw: the
-  //optional call is the only thing standing between a torn-down view and a
-  //TypeError inside the poll loop.
-  assert.equal(
-    await awaitCanvasNodeHost(() => null, () => false, 20, 1, delay),
-    false,
-    "a factory that never appears times out instead of throwing",
-  );
-}
-
-{
-  //The factory can be torn down mid-wait (view closed while the poll runs).
-  let host = { isInitialized: () => false };
-  setTimeout(() => {
-    host = null;
-  }, 3);
-  assert.equal(
-    await awaitCanvasNodeHost(() => host, () => false, 30, 1, delay),
-    false,
-    "a factory that disappears mid-wait times out instead of throwing",
-  );
-}
-
-{
-  //The mount effect is synchronous up to its first await, and the base code
-  //mounted both hosts before returning. Neither fast path may become deferred:
-  //the effect's cleanup runs against whatever these calls have already created.
-  const order = [];
-  const pending = mountEmbeddableHost({
-    subpath: "#Section",
-    fileExtension: "md",
-    getHost: () => ({ isInitialized: () => true }),
-    createCanvasNode: () => order.push("canvas-node"),
-    createWorkspaceLeaf: () => order.push("workspace-leaf"),
-    delay,
-  });
-  order.push("effect-returned");
-  assert.equal(await pending, "canvas-node");
-  assert.deepEqual(
-    order,
-    ["canvas-node", "effect-returned"],
-    "a ready factory mounts the canvas node before the mount effect returns",
-  );
-}
-
-{
-  const order = [];
-  const pending = mountEmbeddableHost({
-    subpath: null,
-    fileExtension: "md",
-    getHost: () => ({ isInitialized: () => true }),
-    createCanvasNode: () => order.push("canvas-node"),
-    createWorkspaceLeaf: () => order.push("workspace-leaf"),
-    delay,
-  });
-  order.push("effect-returned");
-  assert.equal(await pending, "workspace-leaf");
-  assert.deepEqual(
-    order,
-    ["workspace-leaf", "effect-returned"],
-    "a whole-file embed mounts its leaf before the mount effect returns",
-  );
-}
-
-{
-  //The call site cancels on `!leafRef.current || !containerRef.current`, which
-  //the effect cleanup nulls. Cancellation is read again after the wait, so a
-  //teardown that lands while the factory is initializing mounts nothing even
-  //though the factory did become ready.
+block("a teardown landing as the factory readies mounts nothing", async () => {
+  //Cancellation is read again after the wait, so a teardown that lands while
+  //the factory is initializing mounts nothing even though it did become ready.
   let torndown = false;
-  const host = {
-    isInitialized: () => torndown,
-  };
-  setTimeout(() => {
-    torndown = true;
-  }, 5);
+  const host = { isInitialized: () => torndown };
   const { options, calls } = mountRecorder({
     getHost: () => host,
-    isCancelled: () => torndown,
+    isCancelled: () => {
+      torndown = true;
+      return torndown;
+    },
     timeoutMs: 500,
   });
-  assert.equal(
-    await mountEmbeddableHost(options),
-    "none",
-    "a teardown landing as the factory readies mounts nothing",
-  );
-  assert.equal(
-    calls.canvasNodes,
-    0,
-    "a canvas node must not be created into a container the cleanup already released",
-  );
+  assert.equal(await mountEmbeddableHost(options), "none");
+  assert.equal(calls.canvasNodes, 0);
   assert.equal(calls.workspaceLeaves, 0);
-}
+});
 
-{
-  //Several embeddables mount concurrently in one drawing; each dispatch owns
-  //its own wait and must reach its own host.
-  const hosts = [hostReadyAfter(3), hostReadyAfter(1), hostReadyAfter(6)];
-  const recorders = hosts.map((host) =>
-    mountRecorder({ getHost: () => host, timeoutMs: 500 }),
-  );
+block("a ready factory mounts its host before the effect returns", async () => {
+  //The mount effect is synchronous up to its first await, so neither fast path
+  //may become deferred: the effect's cleanup runs against whatever these calls
+  //have already created.
+  for (const [subpath, expected] of [
+    ["#Section", "canvas-node"],
+    [null, "workspace-leaf"],
+  ]) {
+    const order = [];
+    const pending = mountEmbeddableHost({
+      subpath,
+      fileExtension: "md",
+      getHost: () => ({ isInitialized: () => true }),
+      createCanvasNode: () => order.push("canvas-node"),
+      createWorkspaceLeaf: () => order.push("workspace-leaf"),
+      delay,
+    });
+    order.push("effect-returned");
+    assert.equal(await pending, expected);
+    assert.deepEqual(order, [expected, "effect-returned"]);
+  }
+});
+
+block("concurrent embeddables each wait out the factory independently", async () => {
+  const recorders = [5, 2, 7].map((read) => {
+    const host = hostReadyOnRead(read);
+    return mountRecorder({ getHost: () => host, timeoutMs: 500 });
+  });
   const results = await Promise.all(
     recorders.map(({ options }) => mountEmbeddableHost(options)),
   );
-  assert.deepEqual(
-    results,
-    ["canvas-node", "canvas-node", "canvas-node"],
-    "concurrent embeddables each wait out the factory independently",
-  );
+  assert.deepEqual(results, ["canvas-node", "canvas-node", "canvas-node"]);
   for (const { calls } of recorders) {
     assert.equal(calls.canvasNodes, 1);
     assert.equal(calls.workspaceLeaves, 0);
   }
-}
+});
 
 //--------------------------------------------------------------------------------
 //The factory's lifecycle, not the clock, decides how long a subpath embed waits.
 //Startup can legitimately outrun any fixed cap: layout ready polls up to
 //50 x 50 ms before initialize() is called, and initialize() then awaits the core
-//canvas plugin's load. A host that reports whenInitialized is waited on through
+//canvas plugin's load. A host reporting whenInitialized is waited on through
 //that signal; the cap survives only for a host that reports nothing.
+//check-canvas-node-factory-lifecycle.mjs drives the same arm through the real
+//factory; these blocks pin the inputs it cannot produce.
 //--------------------------------------------------------------------------------
 
-/** Factory that reports its lifecycle and readies when the returned hook is run. */
-const lifecycleHost = () => {
-  let settle;
-  const host = {
-    reads: 0,
-    initialized: false,
-    isInitialized: () => {
-      host.reads += 1;
-      return host.initialized;
-    },
-    whenInitialized: new Promise((resolve) => {
-      settle = resolve;
-    }),
-    ready: () => {
-      host.initialized = true;
-      settle(true);
-    },
-    /** initialize() threw, or destroy() ran: it will never host a node. */
-    givesUp: () => {
-      host.initialized = false;
-      settle(false);
-    },
-  };
-  return host;
-};
-
-{
-  //The reported bug at the real default cap: a factory that becomes usable well
-  //after CANVAS_NODE_HOST_WAIT_TIMEOUT_MS must still get its canvas node,
-  //because the slow-startup path is the whole reason for waiting. #2931
+block("readiness after the default cap still mounts a node", async () => {
+  //Elapsed time is the property under test here: readiness lands strictly
+  //after the real default bound, and the outcome must still be the node.
   const host = lifecycleHost();
   setTimeout(() => host.ready(), CANVAS_NODE_HOST_WAIT_TIMEOUT_MS + 150);
   const started = Date.now();
@@ -526,11 +359,7 @@ const lifecycleHost = () => {
     timeoutMs: undefined,
     intervalMs: 25,
   });
-  assert.equal(
-    await mountEmbeddableHost(options),
-    "canvas-node",
-    "a factory that initializes after the default cap still mounts a canvas node",
-  );
+  assert.equal(await mountEmbeddableHost(options), "canvas-node");
   assert.equal(calls.canvasNodes, 1);
   assert.equal(
     calls.workspaceLeaves,
@@ -541,123 +370,84 @@ const lifecycleHost = () => {
     Date.now() - started >= CANVAS_NODE_HOST_WAIT_TIMEOUT_MS,
     "the wait really did outlast the cap rather than readying early",
   );
-}
+});
 
-{
-  //The same shape with a short cap, so the discrimination is pinned twice: the
-  //cap expires long before readiness and must not end the wait.
+block("an expired cap does not end a wait on a starting factory", async () => {
   const host = lifecycleHost();
-  setTimeout(() => host.ready(), 60);
   const { options, calls } = mountRecorder({
     getHost: () => host,
+    isCancelled: () => {
+      //Ready on a later poll, so the cap has expired many times over by then.
+      host.reads >= 5 && host.ready();
+      return false;
+    },
     timeoutMs: 5,
-    intervalMs: 1,
   });
-  assert.equal(
-    await mountEmbeddableHost(options),
-    "canvas-node",
-    "an expired cap does not end a wait on a factory that is still initializing",
-  );
+  assert.equal(await mountEmbeddableHost(options), "canvas-node");
   assert.equal(calls.canvasNodes, 1);
   assert.equal(calls.workspaceLeaves, 0);
-}
+});
 
-{
-  //The fallback survives, on the signal instead of the clock: a factory whose
-  //initialize() threw settles false and the embed takes the old leaf path at
-  //once rather than holding the embeddable blank until a cap expires.
+block("a factory that reports it will not initialize falls back", async () => {
   const host = lifecycleHost();
-  setTimeout(() => host.givesUp(), 5);
   const { options, calls } = mountRecorder({
     getHost: () => host,
+    isCancelled: () => {
+      host.givesUp();
+      return false;
+    },
     timeoutMs: 5000,
-    intervalMs: 1,
   });
   const started = Date.now();
-  assert.equal(
-    await mountEmbeddableHost(options),
-    "workspace-leaf",
-    "a factory that reports it will not initialize falls back at once",
-  );
+  assert.equal(await mountEmbeddableHost(options), "workspace-leaf");
   assert.equal(calls.workspaceLeaves, 1);
   assert.equal(calls.canvasNodes, 0);
   assert.ok(
     Date.now() - started < 1000,
     "the fallback is taken on the signal, not by waiting out the cap",
   );
-}
+});
 
-{
-  //A factory that initialized and was destroyed in the same turn settles true
-  //but can no longer host a node. The read after the signal is what catches it,
-  //and it too must resolve on the signal rather than by waiting out the cap.
+block("a factory destroyed as it settled cannot host a node", async () => {
+  //Settling true and being destroyed in the same turn: the read after the
+  //signal is the only thing that catches it.
   const host = lifecycleHost();
-  setTimeout(() => {
-    host.ready();
-    host.initialized = false; //destroy() ran right behind initialize()
-  }, 5);
   const { options, calls } = mountRecorder({
     getHost: () => host,
+    isCancelled: () => {
+      host.ready();
+      host.initialized = false;
+      return false;
+    },
     timeoutMs: 5000,
-    intervalMs: 1,
   });
-  const started = Date.now();
-  assert.equal(
-    await mountEmbeddableHost(options),
-    "workspace-leaf",
-    "a factory destroyed as it settled cannot host a canvas node",
-  );
+  assert.equal(await mountEmbeddableHost(options), "workspace-leaf");
   assert.equal(calls.canvasNodes, 0);
   assert.equal(calls.workspaceLeaves, 1);
-  assert.ok(
-    Date.now() - started < 1000,
-    "a settled-then-destroyed factory is decided on the signal, not the cap",
-  );
-}
+});
 
-{
+block("an embeddable unmounted while waiting on the lifecycle mounts nothing", async () => {
   //Racing the lifecycle against the poll interval is what keeps an unmount
-  //visible while waiting on a promise that may never settle (control).
+  //observable while waiting on a promise that may never settle.
   const host = lifecycleHost();
-  let torndown = false;
-  setTimeout(() => {
-    torndown = true;
-  }, 5);
   const { options, calls } = mountRecorder({
     getHost: () => host,
-    isCancelled: () => torndown,
+    isCancelled: cancelledOnRead(3),
     timeoutMs: 5000,
-    intervalMs: 1,
   });
-  assert.equal(
-    await mountEmbeddableHost(options),
-    "none",
-    "an embeddable unmounted while waiting on the lifecycle mounts nothing (control)",
-  );
+  assert.equal(await mountEmbeddableHost(options), "none");
   assert.equal(calls.canvasNodes, 0);
   assert.equal(calls.workspaceLeaves, 0);
-}
+});
 
-{
-  //A host that reports no lifecycle keeps the bounded wait: the cap is the
-  //floor for a factory that cannot say when it is done (control).
-  const { options, calls } = mountRecorder({
-    getHost: () => ({ isInitialized: () => false }),
-    timeoutMs: 20,
-    intervalMs: 1,
-  });
-  assert.equal(
-    await mountEmbeddableHost(options),
-    "workspace-leaf",
-    "a factory without a lifecycle signal still falls back at the cap (control)",
-  );
+block("a factory reporting no lifecycle still falls back at the cap", async () => {
+  const { options, calls } = mountRecorder({ getHost: () => unreadyHost, timeoutMs: 20 });
+  assert.equal(await mountEmbeddableHost(options), "workspace-leaf");
   assert.equal(calls.workspaceLeaves, 1);
   assert.equal(calls.canvasNodes, 0);
-}
+});
 
-{
-  //A factory already usable is taken on the fast path without consulting the
-  //lifecycle promise at all (control).
+block("an already initialized factory mounts without consulting the lifecycle", async () => {
   const host = lifecycleHost();
   host.ready();
   const { options, calls } = mountRecorder({
@@ -666,17 +456,10 @@ const lifecycleHost = () => {
     intervalMs: 1000,
   });
   const started = Date.now();
-  assert.equal(
-    await mountEmbeddableHost(options),
-    "canvas-node",
-    "an already initialized factory mounts at once (control)",
-  );
+  assert.equal(await mountEmbeddableHost(options), "canvas-node");
   assert.equal(calls.canvasNodes, 1);
-  assert.ok(
-    Date.now() - started < 1000,
-    "an already settled lifecycle does not wait out a poll interval",
-  );
-}
+  assert.ok(Date.now() - started < 1000, "it did not wait out a poll interval");
+});
 
 //--------------------------------------------------------------------------------
 //Cancellation latches per dispatch. The call site's signal reads leafRef and
@@ -685,103 +468,99 @@ const lifecycleHost = () => {
 //observed the cleanup, and mount over the host the replacement just created.
 //--------------------------------------------------------------------------------
 
-/**
- * Cancellation as React drives it: live at setup, cancelled on the poll that
- * observes this invocation's cleanup, then live again because the replacement
- * invocation repopulated the very same refs. Read-counted so it is deterministic.
- */
-const cancelledOnRead = (read) => {
-  let reads = 0;
-  return () => {
-    reads += 1;
-    return reads === read;
-  };
-};
-
-{
+block("a dispatch cancelled mid-wait stays cancelled when the refs come back", async () => {
   const { options, calls } = mountRecorder({
-    getHost: () => ({ isInitialized: () => false }),
+    getHost: () => unreadyHost,
     isCancelled: cancelledOnRead(2),
     timeoutMs: 5000,
-    intervalMs: 1,
   });
-  assert.equal(
-    await mountEmbeddableHost(options),
-    "none",
-    "a dispatch cancelled mid-wait stays cancelled when the refs come back",
-  );
+  assert.equal(await mountEmbeddableHost(options), "none");
   assert.equal(
     calls.workspaceLeaves,
     0,
     "a superseded wait must not mount a whole-file leaf over the replacement",
   );
   assert.equal(calls.canvasNodes, 0);
-}
+});
 
-{
-  //The same latch on the other outcome: the factory readies while the dispatch
-  //is already superseded, so the stale wait must not create the node either.
+block("a superseded wait creates no node once the factory readies", async () => {
   const host = lifecycleHost();
   const { options, calls } = mountRecorder({
     getHost: () => host,
-    isCancelled: cancelledOnRead(2),
+    isCancelled: (() => {
+      const cancelled = cancelledOnRead(2);
+      return () => {
+        const value = cancelled();
+        host.reads >= 2 && host.ready();
+        return value;
+      };
+    })(),
     timeoutMs: 5000,
-    intervalMs: 1,
   });
-  setTimeout(() => host.ready(), 10);
-  assert.equal(
-    await mountEmbeddableHost(options),
-    "none",
-    "a superseded wait does not create a node once the factory readies",
-  );
-  assert.equal(
-    calls.canvasNodes,
-    0,
-    "a superseded wait must not create a node over the replacement's host",
-  );
+  assert.equal(await mountEmbeddableHost(options), "none");
+  assert.equal(calls.canvasNodes, 0);
   assert.equal(calls.workspaceLeaves, 0);
-}
+});
 
-{
-  //Link changed while the first mount was waiting: only the replacement mounts,
-  //and the replacement takes the fast path the readied factory now offers.
+block("only the current link is mounted when it changes mid-wait", async () => {
+  //The replacement's setup lands while the superseded wait is still polling,
+  //with the factory usable by then, so it takes the fast path.
   const host = lifecycleHost();
   const mounted = [];
+  let replacement;
   const first = mountEmbeddableHost({
     subpath: "#A",
     fileExtension: "md",
     getHost: () => host,
-    isCancelled: cancelledOnRead(2),
+    isCancelled: (() => {
+      const cancelled = cancelledOnRead(2);
+      return () => {
+        const value = cancelled();
+        if (value && replacement === undefined) {
+          host.ready();
+          replacement = mountEmbeddableHost({
+            subpath: "#B",
+            fileExtension: "md",
+            getHost: () => host,
+            isCancelled: () => false,
+            createCanvasNode: () => mounted.push("#B"),
+            createWorkspaceLeaf: () => mounted.push("#B-leaf"),
+            timeoutMs: 5000,
+            intervalMs: 1,
+            delay,
+          });
+        }
+        return value;
+      };
+    })(),
     createCanvasNode: () => mounted.push("#A"),
     createWorkspaceLeaf: () => mounted.push("#A-leaf"),
     timeoutMs: 5000,
     intervalMs: 1,
     delay,
   });
-  await delay(5);
-  host.ready(); //the replacement's setup, with the factory now usable
-  const second = await mountEmbeddableHost({
-    subpath: "#B",
-    fileExtension: "md",
-    getHost: () => host,
-    isCancelled: () => false,
-    createCanvasNode: () => mounted.push("#B"),
-    createWorkspaceLeaf: () => mounted.push("#B-leaf"),
-    timeoutMs: 5000,
-    intervalMs: 1,
-    delay,
-  });
-  assert.equal(second, "canvas-node", "the replacement takes the fast path");
-  assert.equal(
-    await first,
-    "none",
-    "the superseded dispatch reports it mounted nothing",
-  );
+  assert.equal(await first, "none", "the superseded dispatch mounted nothing");
+  assert.equal(await replacement, "canvas-node", "the replacement took the fast path");
   assert.deepEqual(
     mounted,
     ["#B"],
-    "only the current link is mounted; the superseded wait must not replace it",
+    "the superseded wait must not replace the current link's host",
   );
-}
+});
 
-log("embeddable mount plan checks passed");
+let failed = 0;
+for (const [name, fn] of blocks) {
+  try {
+    await fn();
+    log(`PASS ${name}`);
+  } catch (error) {
+    failed += 1;
+    log(`FAIL ${name}: ${error.message.split("\n")[0]}`);
+  }
+}
+if (failed > 0) {
+  process.exitCode = 1;
+  log(`${failed} of ${blocks.length} embeddable mount plan checks failed`);
+} else {
+  log("embeddable mount plan checks passed");
+}

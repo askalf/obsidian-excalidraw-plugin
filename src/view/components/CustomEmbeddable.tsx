@@ -863,7 +863,7 @@ function RenderObsidianView({
     //if subpath is defined, create a canvas node else create a workspace leaf
     //canvasNodeFactory initializes asynchronously on layout ready. A subpath
     //embed that mounted before it was ready used to fall through to a workspace
-    //leaf, which renders the whole file instead of the linked section. #2931
+    //leaf, which renders the whole file instead of the linked section.
     const mountWorkspaceLeaf = () => {
       const viewType = predictViewType(view.app, file);
       // markdown could still be a kanban board or other custom view on top of markdown, those need to be displayed in leaves
@@ -931,10 +931,9 @@ function RenderObsidianView({
       }
     };
 
-    //Owned by this invocation of the effect, unlike leafRef/containerRef which
-    //a replacement invocation repopulates. Without it, changing the link while
-    //the mount is still waiting for the factory leaves the superseded wait
-    //reading its refs as live, and it mounts over the replacement's host.
+    //Owned by this invocation, unlike leafRef/containerRef which a replacement
+    //invocation repopulates: a wait superseded by a link change would otherwise
+    //read its refs as live again and mount over the replacement's host.
     let effectCancelled = false;
 
     void mountEmbeddableHost({
