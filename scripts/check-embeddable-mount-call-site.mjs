@@ -119,6 +119,31 @@ assert.ok(
   "the dispatch must be the whole expression, not an operand of a guard",
 );
 
+assert.equal(
+  collect(
+    (node) =>
+      ts.isIdentifier(node) &&
+      node.text === "canvasNodeFactory" &&
+      enclosingFunction(node) === effect,
+  ).length,
+  0,
+  "the effect's own body must not consult the factory: readiness is the helper's to await, so a read ahead of the dispatch (an early return, a ternary onto the leaf) restores the whole-file leaf on a slow start",
+);
+
+for (const name of ["createNode", "mountWorkspaceLeaf"]) {
+  assert.equal(
+    collect(
+      (node) =>
+        ts.isCallExpression(node) &&
+        ts.isIdentifier(node.expression) &&
+        node.expression.text === name &&
+        enclosingFunction(node) === effect,
+    ).length,
+    0,
+    `the effect must mount only through the dispatch: a direct ${name}() call beside it mounts a second host`,
+  );
+}
+
 const isCancelled = option("isCancelled");
 assert.ok(
   ts.isPropertyAssignment(isCancelled) &&
