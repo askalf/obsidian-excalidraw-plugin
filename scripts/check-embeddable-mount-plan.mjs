@@ -31,7 +31,7 @@ const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 //The wait's poll delay, with hooks keyed by poll number. A hook runs once that
 //poll has been entered, so an event lands at a known point of the wait, and a
-//wait that outlives every hook fails instead of hanging the script.
+//wait that outlives every hook fails the script.
 const polling = (hooks = {}, limit = 50) => {
   const polls = {
     count: 0,
@@ -47,9 +47,8 @@ const polling = (hooks = {}, limit = 50) => {
   return polls;
 };
 
-//Cancellation as React drives it: live at setup, cancelled on the read that
-//observes this invocation's cleanup, then live again because the replacement
-//invocation repopulated the very same refs.
+//Cancellation is live at setup, cancelled on the cleanup read, then live again
+//when the refs are populated.
 const cancelledOnRead = (read) => {
   let reads = 0;
   return () => {
@@ -151,7 +150,7 @@ const PENDING = Symbol("pending");
 const settleWithin = (promise, ms = 50) =>
   Promise.race([promise, delay(ms).then(() => PENDING)]);
 
-//Blocks run independently so one failure does not hide the rest.
+//Blocks run independently.
 const blocks = [];
 const block = (name, fn) => blocks.push([name, fn]);
 
