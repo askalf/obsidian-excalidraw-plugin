@@ -5,8 +5,7 @@
  * rendered section-scoped by a native Canvas node. A workspace leaf always
  * renders the whole file, which for a hybrid drawing is the entire drawing.
  * `CanvasNodeFactory` initializes asynchronously on layout ready, so an
- * embeddable can mount before the factory is usable; these helpers let the
- * caller wait for it instead of silently mounting the wrong host.
+ * embeddable can mount before the factory is usable; these helpers wait for it.
  */
 
 /** Minimal `CanvasNodeFactory` surface needed to decide when a node can be created. */
@@ -22,11 +21,8 @@ export interface CanvasNodeHost {
 
 export const CANVAS_NODE_HOST_WAIT_INTERVAL_MS = 25;
 /**
- * Bounds the wait only while no factory is visible at all. A factory that
- * reports its lifecycle is waited on through that signal instead, because
- * startup can outlast any wall-clock cap: layout ready polls for up to 50 x 50
- * ms before `initialize()` is called, and initialization then awaits the core
- * canvas plugin's load.
+ * Bounds the wait only while no factory is visible at all; a factory that
+ * reports its lifecycle is waited on through that signal.
  */
 export const CANVAS_NODE_HOST_WAIT_TIMEOUT_MS = 2000;
 
@@ -121,10 +117,8 @@ export interface EmbeddableMountOptions {
  * @param options - Link details and the two mount actions.
  * @returns The host that was used, for logging and tests.
  * @remarks
- * A subpath embed waits for the Canvas node factory rather than falling through
- * to a workspace leaf, which would render the whole file instead of the linked
- * section. The workspace leaf remains the fallback when the factory reports it
- * will not initialize.
+ * A subpath embed waits for the Canvas node factory; the workspace leaf is the
+ * fallback when the factory reports it will not initialize.
  */
 export async function mountEmbeddableHost(
   options: EmbeddableMountOptions,
@@ -141,9 +135,7 @@ export async function mountEmbeddableHost(
     delay,
   } = options;
 
-  //Cancellation latches for this invocation: the caller's signal can read live
-  //again once a replacement mount repopulates the refs it watches, and an
-  //operation that has already seen itself cancelled must never mount anything.
+  //Latched: once this invocation has read itself cancelled it stays cancelled.
   let cancelledOnce = false;
   const cancelled = () => {
     cancelledOnce ||= isCancelled();

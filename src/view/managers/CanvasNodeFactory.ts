@@ -62,11 +62,7 @@ export class CanvasNodeFactory {
   private settleInitialized: (initialized: boolean) => void;
   /**
    * Settles true once `initialize()` succeeded, false once it failed or the
-   * factory was destroyed. Lets a caller wait for the real lifecycle instead of
-   * a wall-clock guess: layout ready can poll for up to 50 x 50 ms before
-   * `initialize()` is called at all, and initialization then awaits the core
-   * canvas plugin's load, so no fixed timeout distinguishes a slow start from
-   * one that will never finish.
+   * factory was destroyed.
    */
   public readonly whenInitialized = new Promise<boolean>((resolve) => {
     this.settleInitialized = resolve;
@@ -102,8 +98,6 @@ export class CanvasNodeFactory {
       this.initialized = true;
       this.settleInitialized(true);
     } catch (error) {
-      //Release a caller waiting on the lifecycle before rethrowing, otherwise
-      //it waits forever.
       this.settleInitialized(false);
       throw error;
     }
