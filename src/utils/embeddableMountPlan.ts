@@ -40,8 +40,7 @@ const STILL_INITIALIZING = Symbol("still-initializing");
  * @param fileExtension - Extension of the embedded file.
  * @returns True when only a Canvas node can render the requested section.
  * @remarks
- * Any non-empty subpath counts, including a bare `#`, matching the previous
- * inline truthiness check at the call site.
+ * Any non-empty subpath counts, including a bare `#`.
  */
 export function requiresCanvasNodeHost(
   subpath: string | null | undefined,
@@ -125,7 +124,7 @@ export interface EmbeddableMountOptions {
  * A subpath embed waits for the Canvas node factory rather than falling through
  * to a workspace leaf, which would render the whole file instead of the linked
  * section. The workspace leaf remains the fallback when the factory reports it
- * will not initialize, preserving the previous behavior for that case.
+ * will not initialize.
  */
 export async function mountEmbeddableHost(
   options: EmbeddableMountOptions,

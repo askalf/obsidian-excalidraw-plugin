@@ -3,10 +3,10 @@
 // effect lives in a .tsx that imports the types-only `obsidian` package, so it
 // cannot be loaded here; these checks read its syntax instead. The wait for the
 // factory lives inside the helper, so a guard in front of the dispatch, or a
-// cancellation flag shared between invocations, restores the whole-file
-// workspace leaf while the helper's own checks stay green. Node identity is asserted with assert.ok:
-// assert.equal serializes both nodes on failure, and a parent-linked AST is
-// large enough to exhaust the heap.
+// cancellation flag shared between invocations, would mount the whole-file
+// workspace leaf. Node identity is asserted with assert.ok: assert.equal
+// serializes both nodes on failure, and a parent-linked AST is large enough to
+// exhaust the heap.
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import ts from "typescript";
@@ -121,7 +121,7 @@ assert.ok(
   ts.isPropertyAssignment(getHost) &&
     ts.isArrowFunction(getHost.initializer) &&
     getHost.initializer.body.getText(file) === "view.canvasNodeFactory",
-  "getHost must return the view's factory whatever its state: readiness is for the helper to await",
+  "getHost must return the view's factory whatever its state",
 );
 
 const statement = enclosingStatement(dispatch);
@@ -131,7 +131,7 @@ assert.ok(
 );
 assert.ok(
   statement.parent === effect.body,
-  "the dispatch must sit in the effect's body rather than in a conditional branch: a readiness gate in front of it skips the wait the helper owns",
+  "the dispatch must sit in the effect's body, not in a conditional branch",
 );
 assert.ok(
   (ts.isVoidExpression(statement.expression)
@@ -148,7 +148,7 @@ assert.equal(
       enclosingFunction(node) === effect,
   ).length,
   0,
-  "the effect's own body must not consult the factory: readiness is the helper's to await, so a read ahead of the dispatch (an early return, a ternary onto the leaf) restores the whole-file leaf on a slow start",
+  "the effect's own body must not consult the factory: readiness is the helper's to await",
 );
 
 for (const name of ["createNode", "mountWorkspaceLeaf"]) {
@@ -196,7 +196,7 @@ assert.equal(
 );
 assert.ok(
   enclosingFunction(declarations[0]) === effect,
-  "the cancellation flag must be declared in the mount effect's own body: declared in any enclosing scope it is shared by every invocation, so one embeddable's cleanup cancels the mount that replaced it",
+  "the cancellation flag must be declared in the mount effect's own body, not shared by every invocation",
 );
 
 const cleanup = effect.body.statements.find(ts.isReturnStatement);
@@ -208,7 +208,7 @@ const [firstCleanupStatement] = cleanup.expression.body.statements;
 assert.equal(
   firstCleanupStatement.getText(file),
   "effectCancelled = true;",
-  "the cleanup must supersede a pending mount as its first statement: the early returns below it would otherwise leave the superseded wait live",
+  "the cleanup must supersede a pending mount before any of its early returns",
 );
 
 assert.equal(

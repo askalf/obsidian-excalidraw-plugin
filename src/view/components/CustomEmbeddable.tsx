@@ -861,9 +861,8 @@ function RenderObsidianView({
 
     patchMobileView(view);
     //if subpath is defined, create a canvas node else create a workspace leaf
-    //canvasNodeFactory initializes asynchronously on layout ready. A subpath
-    //embed that mounted before it was ready used to fall through to a workspace
-    //leaf, which renders the whole file instead of the linked section.
+    //canvasNodeFactory initializes asynchronously on layout ready, so a subpath
+    //embed waits for it: a workspace leaf would render the whole file.
     const mountWorkspaceLeaf = () => {
       const viewType = predictViewType(view.app, file);
       // markdown could still be a kanban board or other custom view on top of markdown, those need to be displayed in leaves
