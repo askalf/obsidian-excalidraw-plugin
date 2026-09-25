@@ -29,6 +29,7 @@ I build this plugin as a labor of love. Curious about the philosophy behind it? 
 ## Fixed / Refactored
 - Lasso tool was not available in the More Tools menu in Tray Mode [#2937](${URLs.GITHUB_COM_ZSVICZIAN_OBSIDIAN_EXCALIDRAW_PLUGIN_ISSUES}/2937)
 - \`.excalidraw\` drawings with embedded binary images now render those images when opened into an already-used Excalidraw tab. [#2929](${URLs.GITHUB_COM_ZSVICZIAN_OBSIDIAN_EXCALIDRAW_PLUGIN_ISSUES}/2929)
+- A back-of-the-note embeddable no longer initializes as an image of the whole drawing when it mounts before the Canvas node factory is ready. [#2931](${URLs.GITHUB_COM_ZSVICZIAN_OBSIDIAN_EXCALIDRAW_PLUGIN_ISSUES}/2931)
 - Descriptions in settings no longer disappear when you revisit a settings page from search results. [#2935](${URLs.GITHUB_COM_ZSVICZIAN_OBSIDIAN_EXCALIDRAW_PLUGIN_ISSUES}/2935)
 - Drawing persistence is now more reliable during rapid edits across multiple tabs, popout moves, and immediate closing. Backups and automatic exports now track the exact successfully saved revision. [#2933](${URLs.GITHUB_COM_ZSVICZIAN_OBSIDIAN_EXCALIDRAW_PLUGIN_PULL}/2933)
 - Rapidly changing Markdown image appearance, selection, or image/embeddable conversion no longer leaves a rejected image-render promise in the console or lets a superseded render overwrite the newer element state.

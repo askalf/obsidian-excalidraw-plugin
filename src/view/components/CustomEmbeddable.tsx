@@ -22,6 +22,7 @@ import {
   createLeaf,
   predictViewType,
 } from "src/utils/customEmbeddableUtils";
+import { mountEmbeddableHost } from "src/utils/embeddableMountPlan";
 import { EmbeddableMDCustomProps } from "src/shared/Dialogs/EmbeddableSettings";
 import { EmbeddableLeafRef } from "src/types/excalidrawViewTypes";
 import { t } from "src/lang/helpers";
@@ -859,14 +860,7 @@ function RenderObsidianView({
     };
 
     patchMobileView(view);
-    //if subpath is defined, create a canvas node else create a workspace leaf
-    if (
-      subpath &&
-      view.canvasNodeFactory.isInitialized() &&
-      file.extension.toLowerCase() === "md"
-    ) {
-      createNode("markdown");
-    } else {
+    const mountWorkspaceLeaf = () => {
       const viewType = predictViewType(view.app, file);
       // markdown could still be a kanban board or other custom view on top of markdown, those need to be displayed in leaves
       if (
@@ -931,9 +925,24 @@ function RenderObsidianView({
           }
         })();
       }
-    }
+    };
+
+    let effectCancelled = false;
+
+    //if subpath is defined, create a canvas node else create a workspace leaf
+    void mountEmbeddableHost({
+      subpath,
+      fileExtension: file.extension,
+      getHost: () => view.canvasNodeFactory,
+      isCancelled: () =>
+        effectCancelled || !leafRef.current || !containerRef.current,
+      createCanvasNode: () => createNode("markdown"),
+      createWorkspaceLeaf: mountWorkspaceLeaf,
+    });
 
     return () => {
+      effectCancelled = true;
+
       // disconnect observer if any
       pdfObserverRef.currentCleanup?.();
       pdfObserverRef.current?.disconnect();
