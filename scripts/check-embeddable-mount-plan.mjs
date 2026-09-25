@@ -1,11 +1,5 @@
-// Host selection for an embedded file: `requiresCanvasNodeHost`,
-// `awaitCanvasNodeHost` and `mountEmbeddableHost`, then the producer side of the
-// wait, `CanvasNodeFactory.whenInitialized`, driven through the same dispatch.
-//
-// The factory imports `obsidian` (types only, `"main": ""`) and
-// `utils/obsidianUtils` (which pulls in the whole plugin), so both are aliased
-// to the stub module next to this file. The lifecycle, the promise and the
-// dispatch are the shipped code.
+// Exercises host selection and CanvasNodeFactory lifecycle behavior. The factory
+// dependencies are aliased to the local stub module for this Node process.
 import assert from "node:assert/strict";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -286,7 +280,7 @@ block("a zero timeout allows exactly one read", async () => {
 });
 
 //--------------------------------------------------------------------------------
-//mountEmbeddableHost: the dispatch the embeddable mount effect calls
+// mountEmbeddableHost
 //--------------------------------------------------------------------------------
 
 block(
@@ -596,8 +590,7 @@ block(
 );
 
 //--------------------------------------------------------------------------------
-//CanvasNodeFactory.whenInitialized: the three sites that settle it, and the real
-//factory driven through the real dispatch
+// CanvasNodeFactory.whenInitialized
 //--------------------------------------------------------------------------------
 
 block("initialize() settles the lifecycle true once it succeeds", async () => {

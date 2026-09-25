@@ -1,12 +1,6 @@
-// `mountEmbeddableHost` is only a fix while the embeddable mount effect really
-// dispatches through it: unconditionally, and cancelling per invocation. The
-// effect lives in a .tsx that imports the types-only `obsidian` package, so it
-// cannot be loaded here; these checks read its syntax instead. The wait for the
-// factory lives inside the helper, so a guard in front of the dispatch, or a
-// cancellation flag shared between invocations, would mount the whole-file
-// workspace leaf. Node identity is asserted with assert.ok: assert.equal
-// serializes both nodes on failure, and a parent-linked AST is large enough to
-// exhaust the heap.
+// This component imports types that are unavailable to this Node process, so
+// these checks inspect its TypeScript syntax. Node identity uses assert.ok because
+// serializing a parent-linked AST can exhaust the heap.
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import ts from "typescript";
@@ -61,7 +55,7 @@ assert.equal(
       node.moduleSpecifier.text === "src/utils/embeddableMountPlan",
   ).length,
   1,
-  "the mount effect must import the mount-plan dispatch",
+  "the component has one embeddable mount-plan import",
 );
 
 const dispatches = collect(
@@ -73,16 +67,16 @@ const dispatches = collect(
 assert.equal(
   dispatches.length,
   1,
-  "the mount effect must call mountEmbeddableHost exactly once",
+  "the component has one mountEmbeddableHost call",
 );
 const [dispatch] = dispatches;
 const effect = enclosingFunction(dispatch);
-assert.ok(effect, "the dispatch must be called from the mount effect");
+assert.ok(effect, "mountEmbeddableHost is called by a function");
 
 const [options] = dispatch.arguments;
 assert.ok(
   options && ts.isObjectLiteralExpression(options),
-  "the dispatch must be passed its mount options",
+  "mountEmbeddableHost receives an options object",
 );
 const option = (name) =>
   options.properties.find(
@@ -100,44 +94,40 @@ for (const name of [
   "createCanvasNode",
   "createWorkspaceLeaf",
 ]) {
-  assert.ok(option(name), `the dispatch must pass ${name}`);
+  assert.ok(option(name), `the options object has ${name}`);
 }
 
-//The helper decides between the hosts from these three inputs. A readiness
-//test folded into any of them (a subpath or extension blanked while the
-//factory starts, a getHost that hides an unready factory) keeps the dispatch
-//unconditional in form and still routes a slow start to the whole-file leaf.
 assert.ok(
   ts.isShorthandPropertyAssignment(option("subpath")),
-  "the dispatch must forward the link's subpath as it is",
+  "subpath is a shorthand option",
 );
 assert.equal(
   option("fileExtension").initializer?.getText(file),
   "file.extension",
-  "the dispatch must forward the file's own extension",
+  "fileExtension is file.extension",
 );
 const getHost = option("getHost");
 assert.ok(
   ts.isPropertyAssignment(getHost) &&
     ts.isArrowFunction(getHost.initializer) &&
     getHost.initializer.body.getText(file) === "view.canvasNodeFactory",
-  "getHost must return the view's factory whatever its state",
+  "getHost returns view.canvasNodeFactory",
 );
 
 const statement = enclosingStatement(dispatch);
 assert.ok(
   ts.isExpressionStatement(statement),
-  "the dispatch must be a statement of its own",
+  "mountEmbeddableHost is an expression statement",
 );
 assert.ok(
   statement.parent === effect.body,
-  "the dispatch must sit in the effect's body, not in a conditional branch",
+  "the expression statement belongs to the function body",
 );
 assert.ok(
   (ts.isVoidExpression(statement.expression)
     ? statement.expression.expression
     : statement.expression) === dispatch,
-  "the dispatch must be the whole expression, not an operand of a guard",
+  "the expression statement contains only mountEmbeddableHost",
 );
 
 assert.equal(
@@ -148,7 +138,7 @@ assert.equal(
       enclosingFunction(node) === effect,
   ).length,
   0,
-  "the effect's own body must not consult the factory: readiness is the helper's to await",
+  "the caller body has no canvasNodeFactory identifier",
 );
 
 for (const name of ["createNode", "mountWorkspaceLeaf"]) {
@@ -161,7 +151,7 @@ for (const name of ["createNode", "mountWorkspaceLeaf"]) {
         enclosingFunction(node) === effect,
     ).length,
     0,
-    `the effect must mount only through the dispatch: a direct ${name}() call beside it mounts a second host`,
+    `the caller body has no direct ${name} call`,
   );
 }
 
@@ -169,7 +159,7 @@ const isCancelled = option("isCancelled");
 assert.ok(
   ts.isPropertyAssignment(isCancelled) &&
     ts.isArrowFunction(isCancelled.initializer),
-  "the cancellation signal must be a function the helper can re-read",
+  "isCancelled is an arrow function",
 );
 let firstOperand = isCancelled.initializer.body;
 while (
@@ -180,7 +170,7 @@ while (
 }
 assert.ok(
   ts.isIdentifier(firstOperand) && firstOperand.text === "effectCancelled",
-  "the cancellation signal must consult this invocation's own flag first, not only the refs a replacement mount repopulates",
+  "the cancellation expression starts with effectCancelled",
 );
 
 const declarations = collect(
@@ -192,23 +182,23 @@ const declarations = collect(
 assert.equal(
   declarations.length,
   1,
-  "the cancellation flag must be declared exactly once",
+  "effectCancelled has one declaration",
 );
 assert.ok(
   enclosingFunction(declarations[0]) === effect,
-  "the cancellation flag must be declared in the mount effect's own body, not shared by every invocation",
+  "effectCancelled is declared by the calling function",
 );
 
 const cleanup = effect.body.statements.find(ts.isReturnStatement);
 assert.ok(
   cleanup && ts.isArrowFunction(cleanup.expression),
-  "the mount effect must return a cleanup",
+  "the calling function returns an arrow function",
 );
 const [firstCleanupStatement] = cleanup.expression.body.statements;
 assert.equal(
   firstCleanupStatement.getText(file),
   "effectCancelled = true;",
-  "the cleanup must supersede a pending mount before any of its early returns",
+  "the cleanup starts with effectCancelled = true;",
 );
 
 assert.equal(
@@ -220,7 +210,7 @@ assert.equal(
       enclosingFunction(node) === effect,
   ).length,
   1,
-  "the workspace leaf path must remain a callable the dispatch can fall back to",
+  "mountWorkspaceLeaf has one declaration in the calling function",
 );
 
 log("embeddable mount call site checks passed");
