@@ -36,12 +36,16 @@ const log = (message) => process.stdout.write(`${message}\n`);
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 //The wait's poll delay, with hooks keyed by poll number. A hook runs once that
-//poll has been entered, so an event lands at a known point of the wait.
-const polling = (hooks = {}) => {
+//poll has been entered, so an event lands at a known point of the wait, and a
+//wait that outlives every hook fails instead of hanging the script.
+const polling = (hooks = {}, limit = 50) => {
   const polls = {
     count: 0,
     delay: (ms) => {
       polls.count += 1;
+      if (polls.count > limit) {
+        return Promise.reject(new Error(`still polling after ${limit} polls`));
+      }
       hooks[polls.count]?.();
       return delay(ms);
     },
