@@ -366,9 +366,8 @@ block("a factory reporting no lifecycle falls back at the cap", async () => {
 block(
   "an embeddable unmounted before or during its wait mounts nothing",
   async () => {
-    //The signal is read again after the wait, and what it reported once is
-    //latched, so a superseded wait mounts nothing even when the refs it reads
-    //come back live and the factory becomes usable meanwhile.
+    //A cancellation observed before readiness remains effective even if later
+    //reads are live and the factory becomes usable.
     const cancelledThenReadies = (host, read) => {
       const cancelled = cancelledOnRead(read);
       let reads = 0;
@@ -433,11 +432,11 @@ block(
 );
 
 block("only the current link is mounted when it changes mid-wait", async () => {
-  //The replacement's setup lands while the superseded wait is still polling,
-  //with the factory usable by then, so it takes the fast path.
+  //The first wait observes cancellation while polling. The second mount sees a
+  //ready factory and completes without polling.
   const host = lifecycleHost();
   const mounted = [];
-  let replacement;
+  let nextMount;
   const cancelled = cancelledOnRead(2);
   const first = mountEmbeddableHost({
     subpath: "#A",
@@ -445,9 +444,9 @@ block("only the current link is mounted when it changes mid-wait", async () => {
     getHost: () => host,
     isCancelled: () => {
       const value = cancelled();
-      if (value && replacement === undefined) {
+      if (value && nextMount === undefined) {
         host.ready();
-        replacement = mountEmbeddableHost({
+        nextMount = mountEmbeddableHost({
           subpath: "#B",
           fileExtension: "md",
           getHost: () => host,
@@ -465,11 +464,11 @@ block("only the current link is mounted when it changes mid-wait", async () => {
     intervalMs: 1,
     delay,
   });
-  assert.equal(await first, "none", "the superseded dispatch mounted nothing");
+  assert.equal(await first, "none", "the cancelled mount created no host");
   assert.equal(
-    await replacement,
+    await nextMount,
     "canvas-node",
-    "the replacement took the fast path",
+    "the ready mount completed without polling",
   );
   assert.deepEqual(mounted, ["#B"]);
 });
@@ -510,8 +509,8 @@ block("an expired cap does not end a wait on a starting factory", async () => {
 block(
   "a factory that reports it will not initialize falls back on that signal",
   async () => {
-    //Settling false, and settling true while no longer able to host a node, both
-    //end the wait on the poll they land in rather than at the cap.
+    //A false lifecycle result, or a ready result with no usable node, ends the
+    //wait on the poll that observes that result.
     for (const [name, settle] of [
       ["gives up", (host) => host.givesUp()],
       [
