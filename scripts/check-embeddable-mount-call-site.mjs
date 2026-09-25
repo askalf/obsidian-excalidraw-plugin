@@ -103,6 +103,27 @@ for (const name of [
   assert.ok(option(name), `the dispatch must pass ${name}`);
 }
 
+//The helper decides between the hosts from these three inputs. A readiness
+//test folded into any of them (a subpath or extension blanked while the
+//factory starts, a getHost that hides an unready factory) keeps the dispatch
+//unconditional in form and still routes a slow start to the whole-file leaf.
+assert.ok(
+  ts.isShorthandPropertyAssignment(option("subpath")),
+  "the dispatch must forward the link's subpath as it is",
+);
+assert.equal(
+  option("fileExtension").initializer?.getText(file),
+  "file.extension",
+  "the dispatch must forward the file's own extension",
+);
+const getHost = option("getHost");
+assert.ok(
+  ts.isPropertyAssignment(getHost) &&
+    ts.isArrowFunction(getHost.initializer) &&
+    getHost.initializer.body.getText(file) === "view.canvasNodeFactory",
+  "getHost must return the view's factory whatever its state: readiness is for the helper to await",
+);
+
 const statement = enclosingStatement(dispatch);
 assert.ok(
   ts.isExpressionStatement(statement),
